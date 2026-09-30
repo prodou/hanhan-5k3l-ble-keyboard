@@ -8,6 +8,8 @@
     <string>HanHan Agent</string>
     <key>CFBundleIdentifier</key>
     <string>com.hanhan.hanhanagent</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>0.1</string>
     <key>CFBundleShortVersionString</key>

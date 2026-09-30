@@ -9,6 +9,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc main.swift -o "$APP/Contents/MacOS/HanHanAgent" -framework Cocoa -framework ApplicationServices
 cp Info.plist "$APP/Contents/Info.plist"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 
 echo "Built: $APP"
