@@ -154,7 +154,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.title = "HH"
+        if let icon = NSImage(named: "AppIcon") {
+            let menuBarIcon = NSImage(size: NSSize(width: 18, height: 18))
+            menuBarIcon.lockFocus()
+            icon.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18),
+                      from: .zero, operation: .sourceOver, fraction: 1.0)
+            menuBarIcon.unlockFocus()
+            menuBarIcon.isTemplate = false // 保留猫咪原色, 不走系统单色模板渲染
+            statusItem.button?.image = menuBarIcon
+        } else {
+            statusItem.button?.title = "HH"
+        }
         rebuildMenu()
     }
 
