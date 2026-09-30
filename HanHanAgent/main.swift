@@ -37,8 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        targetBundleID = UserDefaults.standard.string(forKey: kDefaultsTargetBundleIDKey)
         setupStatusItem()
+        targetBundleID = UserDefaults.standard.string(forKey: kDefaultsTargetBundleIDKey)
         ensureAccessibilityPermission()
         setupEventTap()
 
@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func rebuildMenu() {
+        guard statusItem != nil else { return }
         let menu = NSMenu()
 
         let titleItem = NSMenuItem(title: "HanHan Agent", action: nil, keyEquivalent: "")
