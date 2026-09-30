@@ -1,0 +1,14 @@
+# Arduino / esp32 build output
+build/
+build_out/
+build_out2/
+build_test/
+*.bin
+*.elf
+*.map
+
+# HanHan Agent build artifacts (app bundle produced by build.sh, distributed via Releases instead)
+HanHanAgent/build/
+
+# macOS
+.DS_Store
