@@ -332,12 +332,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passRetained(event)
         }
 
+        NSLog("[HanHanAgent] 命中按键 keycode=\(keycode) type=\(type == .keyDown ? "down" : "up")")
+
         // 命中目标键: 按预设动作转发到目标 App 实例(不抢焦点), 并吞掉原始事件
         guard let target = targetApp, !target.isTerminated else {
+            NSLog("[HanHanAgent] 没有可用目标(targetApp 为空或已退出), 按键被吞掉但不会转发")
             return nil
         }
         let pid = target.processIdentifier
         let action = keyActions[keycode] ?? .passthrough
+
+        NSLog("[HanHanAgent] 转发给 pid=\(pid) (\(target.localizedName ?? "?")) action=\(action.rawValue)")
 
         if action == .passthrough {
             if let copy = event.copy() {
@@ -348,6 +353,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let synthetic = CGEvent(keyboardEventSource: nil, virtualKey: vk, keyDown: (type == .keyDown)) {
                 synthetic.flags = flags
                 synthetic.postToPid(pid)
+                NSLog("[HanHanAgent] 已合成并投递 vk=\(vk) flags=\(flags.rawValue)")
+            } else {
+                NSLog("[HanHanAgent] 合成按键事件失败!")
             }
         }
 
