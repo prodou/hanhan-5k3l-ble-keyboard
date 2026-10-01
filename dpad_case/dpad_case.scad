@@ -12,11 +12,17 @@
 //   腾出空间加大焊接预留; 每按键独立卡槽+两个过线孔
 // v6改动: 卡槽改成"台阶+深槽"结构试图解决引脚比本体低的问题, 新增盖板(retainer)
 //   —— 打样后发现引脚两侧那两个深槽做得太大太夸张, 偏离了"中间凹一点放进去"的本意
-// v7改动(本次, 按反馈简化): 卡槽直接还原成一个简单的矩形, 直接贯穿整个载板厚度
-//   (不再分台阶/深槽), 形状=按键壳体轮廓(窄边perp_margin收紧到贴合, 引脚方向
-//   leg_margin留够焊接空间)。按键前面靠面板/cap的顶杆顶住, 后面靠盖板(retainer)
-//   挡住不会往后掉, 载板只负责四周卡住不晃。走线孔全部挪到盖板上开(载板上完全
-//   不开过线孔/槽), 盖板上每个按键两端各开一个小孔(1.0mm)对准引脚位置走线。
+// v7改动: 卡槽改成简单矩形直接贯穿整个载板厚度 —— 打样后发现贯穿孔从正面
+//   看也是两个方正的洞, 偏离了"中间凹一点放按键壳体"的本意, 废弃。
+// v8改动(本次, 按反馈再修正): 卡槽改成"从背面往里凹的分层沉孔", 不再贯穿:
+//   - 引脚层(leg_zone, 靠背面, 宽=含引脚+焊接预留, 深leg_zone_depth): 放引脚/
+//     焊点/引线弯折, 这一层背面是敞开的(不盖东西), 走线从这里直接出去
+//   - 本体层(body_zone, 紧接引脚层往正面方向, 窄=贴合按键壳体, 深body_zone_depth):
+//     卡住按键本体, 正面看过去只会看到这一层(窄的), 不是方正大洞
+//   - 只有对准2mm圆顶的位置, 有个小圆孔(actuator_d)贯穿剩余厚度到正面,
+//     让cap的顶杆穿过去压圆顶
+//   盖板(retainer)不再开过线孔, 而是在对应每个按键的引脚层位置整块镂空(不盖住),
+//   让载板上本来就敞开的引脚层保持敞开, 走线可以直接从背面任意方向出去。
 //
 // 用法:
 //   1. 用 OpenSCAD (https://openscad.org) 打开本文件
@@ -49,15 +55,15 @@ button_h       = 1.5;    // 按键总高度(贴装面到静止顶部)
 button_dome_d  = 2.0;    // 按压圆点直径
 actuator_d     = 2.3;    // 载板上贯穿孔径(对准2mm圆点, 留0.3mm余量), cap顶杆由此穿过去压键
 
-// v7改动: 还原成一个简单的卡槽(不再分台阶+深槽) —— 整个卡槽直接贯穿
-// 整个载板厚度, 形状刚好是按键壳体的轮廓(窄边收紧贴合, 引脚方向留够焊接空间)。
-// 这样按键前面靠面板/cap的顶杆压住顶不出去, 后面靠新增的盖板(retainer)挡住
-// 不会往后掉, 载板本身只负责卡住四周, 不用再纠结"引脚比本体低一截"的台阶问题。
-// 引脚焊线不在载板上开孔, 直接走盖板(retainer)上开的小孔出去。
-perp_margin    = 0.15;   // 窄边(垂直引脚方向)预留: 缩到刚好能放进去
+// v8改动: 卡槽改成"背面往里凹的分层沉孔", 不贯穿(只有中间圆顶孔贯穿正面)
+perp_margin    = 0.15;   // 窄边(垂直引脚方向)预留: 两层都缩到刚好能放进去
 leg_margin     = 0.7;    // 引脚方向焊接预留空间(超出引脚尖端, 单边), 留大一点方便焊接不短路
-pocket_len     = button_leg_x + 2*leg_margin;   // 卡槽沿引脚方向的长度(含焊接预留)
-pocket_w       = button_body_y + 2*perp_margin; // 卡槽垂直引脚方向的宽度(贴合本体)
+body_margin    = 0.15;   // 本体层沿引脚方向的贴合间隙(单边)
+pocket_len     = button_leg_x + 2*leg_margin;   // 引脚层长度(含焊接预留, 沿引脚方向)
+pocket_w       = button_body_y + 2*perp_margin; // 两层共用的宽度(垂直引脚方向, 贴合本体)
+body_pocket_len = button_body_x + 2*body_margin; // 本体层长度(沿引脚方向, 贴合壳体)
+leg_zone_depth  = 0.7;   // 引脚层深度(从背面往里凹, 容纳引脚+焊点+引线弯折高度)
+body_zone_depth = 0.9;   // 本体层深度(紧接引脚层, 卡住按键本体, 深度之和约等于按键总高)
 
 wire_groove_w  = 1.3;    // LED引脚走线槽宽(配合0.9mm硅胶线)
 wire_groove_depth = 1.0; // 走线槽深度(比按键卡槽浅, 只需过线)
@@ -66,9 +72,9 @@ wire_groove_depth = 1.0; // 走线槽深度(比按键卡槽浅, 只需过线)
 cap_t          = 1.6;    // cap本体厚度(含帽檐)
 cap_rim_d      = key_hole_d - 0.4;  // cap外径(略小于面板孔, 留滑动间隙)
 nub_d          = 2.0;    // cap背面顶杆直径(对准2mm圆点, 比actuator_d略小可自由穿过)
-nub_h          = 0.3;    // cap背面顶杆长度: 本设计面板+载板零间隙贴合,
-                          // = 卡槽深度(pocket_depth) - 按键实际高度(button_h) + 一点预压量
-                          // 理论值≈0.2mm, 这里给了0.3mm, 装配后太松/太紧都需要实测微调重新打印!
+nub_h          = 0.75;   // cap背面顶杆长度: 需要穿过载板正面那段"只剩圆孔"的通道
+                          // = carrier_t - leg_zone_depth - body_zone_depth + 一点预压量
+                          // 理论值≈0.6mm通道+0.15预压, 装配后太松/太紧都需要实测微调重新打印!
 
 // LED: 放回顶部一排(cap缩小后腾出的空间), 孔不用太大, 能看到光点就行
 led_hole_d     = 3.0;    // 面板LED过孔
@@ -79,13 +85,13 @@ led_positions  = [[-led_pitch,led_row_cy], [0,led_row_cy], [led_pitch,led_row_cy
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
 carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
 carrier_h      = panel_area - 0.6;  // 载板高
-carrier_t      = 2.2;    // 载板厚度(卡槽贯穿整个厚度, 这个值决定按键侧壁卡住的深度)
+carrier_t      = 2.2;    // 载板厚度(分层沉孔: 引脚层0.7+本体层0.9, 剩下的0.6留给正面圆孔通道)
 carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 
 // 盖板(retainer, 新增第5个零件): 贴在载板背面(靠电池那一侧), 把按键夹在
-// 载板和盖板之间防止移动/被顶出来; 盖板上只开小孔走引线, 不需要对应面板孔。
+// 载板和盖板之间防止移动/被顶出来; 对应每个按键的引脚层位置整块镂空(不盖住),
+// 让载板本来就敞开的引脚层保持敞开, 走线可以直接从背面出去, 不需要额外开孔。
 retainer_t       = 1.0;   // 盖板厚度
-retainer_hole_d  = 1.0;   // 盖板上的过线孔径(对准每个按键两端的引脚槽, 刚好让单根0.9mm线穿过)
 retainer_peg_d   = carrier_peg_d - 0.2; // 盖板定位柱直径(插入载板定位孔背面那一截)
 retainer_peg_h   = 1.0;   // 盖板定位柱长度(载板定位孔总深carrier_t=2.2, 正面已被shell的peg占了1.0mm, 背面还剩1.2mm可插)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
@@ -176,20 +182,32 @@ module shell() {
         cube([cube_size-2*wall, esp32_w, 1]);
 }
 
-// 单个按键的卡槽: 贯穿整个载板厚度, 形状=按键壳体轮廓(窄边贴合, 引脚方向留焊接空间)
+// 单个按键的卡槽: 从背面(z=carrier_t这一侧)往里凹的分层沉孔, 不贯穿到正面
 // (vertical=false: 引脚水平/沿x方向; true: 引脚转90度/沿y方向)
-// 前面靠面板+cap顶杆压住, 后面靠retainer盖板挡住, 载板本身只负责四周卡住不晃。
+//   - 引脚层: 靠背面, 宽(含引脚+焊接预留), 深leg_zone_depth, 背面敞开走线
+//   - 本体层: 紧接引脚层往正面方向, 窄(贴合本体), 深body_zone_depth
+//   - 圆顶通孔: 从本体层继续贯穿剩余厚度到正面, 让cap顶杆穿过去压圆顶
 module key_pocket(cx, cy, vertical) {
-    px = vertical ? pocket_w : pocket_len;
-    py = vertical ? pocket_len : pocket_w;
-    translate([cx-px/2, cy-py/2, -0.5])
-        cube([px, py, carrier_t+1]);
+    eps = 0.05;
+
+    leg_px = vertical ? pocket_w : pocket_len;
+    leg_py = vertical ? pocket_len : pocket_w;
+    translate([cx-leg_px/2, cy-leg_py/2, carrier_t-leg_zone_depth-eps])
+        cube([leg_px, leg_py, leg_zone_depth+eps]);
+
+    body_px = vertical ? pocket_w : body_pocket_len;
+    body_py = vertical ? body_pocket_len : pocket_w;
+    translate([cx-body_px/2, cy-body_py/2, carrier_t-leg_zone_depth-body_zone_depth-eps])
+        cube([body_px, body_py, body_zone_depth+2*eps]);
+
+    translate([cx, cy, -0.5])
+        cylinder(d=actuator_d, h=carrier_t-leg_zone_depth-body_zone_depth+0.5+eps, $fn=32);
 }
 
 // ---------------- 载板(贴片按键固定件) ----------------
-// 5个按键各自独立开卡槽(贯穿整个载板厚度), 上/下/中 三键引脚保持水平(H),
-// 左/右 两键转90度变成引脚竖直(V) —— 这样同一排的左/中/右三键之间
-// 就不再是"引脚对引脚"占满4.0mm宽度, 而是"本体对本体"只占3.4mm宽度,
+// 5个按键各自独立开卡槽(背面分层沉孔, 只有中间圆顶孔贯穿正面), 上/下/中 三键
+// 引脚保持水平(H), 左/右 两键转90度变成引脚竖直(V) —— 这样同一排的左/中/右
+// 三键之间就不再是"引脚对引脚"占满4.0mm宽度, 而是"本体对本体"只占3.4mm宽度,
 // 省出来的空间正好用来加大 leg_margin, 让焊接/走线更宽松不容易短路。
 module carrier() {
     cx = carrier_w/2;
@@ -218,8 +236,8 @@ module carrier() {
 }
 
 // ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
-// 整块实心板贴住载板背面, 挡住5个贯穿卡槽(按键靠在这块板上不会往后掉出去),
-// 只在每个按键两端引脚位置开小孔走线, 中间(本体正对的地方)不开孔。
+// 整块板贴住载板背面, 对应每个按键"引脚层"的位置整块镂空(不盖住), 让载板上
+// 本来就敞开的引脚层保持敞开, 走线可以直接从背面任意方向出去, 不需要额外开孔。
 module retainer() {
     cx = carrier_w/2;
     cy = carrier_h/2 + key_cross_cy;
@@ -235,11 +253,10 @@ module retainer() {
 
         for (p = positions_oriented) {
             bx = p[0]; by = p[1]; vertical = p[2];
-            hole_offset = pocket_len/2 - retainer_hole_d/2 - 0.2; // 贴着卡槽两端, 留点边
-            off = vertical ? [0, hole_offset] : [hole_offset, 0];
-            for (s=[-1,1])
-                translate([bx+s*off[0], by+s*off[1], -1])
-                    cylinder(d=retainer_hole_d, h=retainer_t+2, $fn=16);
+            leg_px = vertical ? pocket_w : pocket_len;
+            leg_py = vertical ? pocket_len : pocket_w;
+            translate([bx-leg_px/2, by-leg_py/2, -1])
+                cube([leg_px, leg_py, retainer_t+2]);
         }
     }
     // 四角定位柱(从盖板正面往上凸, 插入载板定位孔背面那一截, 和shell的定位柱分别从两头顶住载板)
@@ -252,7 +269,7 @@ module retainer() {
 
 // ---------------- 按键帽(cap) ----------------
 // 放大的手指按压目标, 装进面板的key_hole_d孔里可自由上下滑动,
-// 背面的小顶杆(nub)伸进载板的卡槽(现在整个卡槽都是通的), 精确压住实际贴片按键的触点。
+// 背面的小顶杆(nub)穿过载板正面的圆孔(actuator_d), 精确压住实际贴片按键的圆顶触点。
 module cap() {
     union() {
         // 帽体(露在面板外面的大圆饼, 带一点弧度更好按, 这里简化成平的)
