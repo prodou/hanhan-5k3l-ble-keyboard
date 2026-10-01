@@ -1,38 +1,55 @@
 // ============================================================
-// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计
+// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v2: 按键放大占满22x22)
 // 对应 firmware/esp32c3_5btn_3led_ble
 //   5键: GPIO0/1/3/4/10 (上下左右+中)
 //   3灯: GPIO2/6/7 (共用限流电阻, 分时复用)
 //
-// 用法:
-//   1. 用 OpenSCAD (https://openscad.org 免费, 直接下载dmg安装, 不走brew)打开本文件
-//   2. 按需修改下面"====可调参数===="区域(务必先用卡尺实测你买到的
-//      贴片按键尺寸, 和ESP32-C3-Super-Mini的实际外形再改!)
-//   3. 顶部 part_to_render 切换要导出的零件, 然后 File > Export > STL
+// v2改动:
+//   - 十字按键整体放大, 占满面板22x22可用区域(之前是缩在一角的小按键)
+//   - 新增"按键帽(cap)"零件: 面板开大孔(手指目标更大), cap背面有个小顶杆
+//     精确顶在实际贴片按键(很小)的中心上, 兼顾手感和实际器件尺寸
+//   - LED改放在十字按键中间的空隙里, 不用再单独占一排位置,
+//     也不要求和光源精确对孔, 能透光看到亮点就行
 //
-// 建议打印方式: 树脂(SLA/DLP)打印, 因为孔位/间距都在3-7mm级别,
-// FDM(熔丝)在这个尺寸下公差和开孔精度不够, 按键容易卡死或晃动。
+// 用法:
+//   1. 用 OpenSCAD (https://openscad.org) 打开本文件
+//   2. 实测你买的贴片按键尺寸/厚度, 改 key_pocket_w / key_pocket_h / actuator_d
+//      实测 ESP32-C3-Super-Mini 外形, 改 esp32_w/esp32_l/esp32_t
+//      实测 面板到载板到按键顶部的装配间隙, 改 nub_h (这个最关键, 决定手感)
+//   3. 顶部 part_to_render 切换要导出的零件, 然后 File > Export > STL
+//      cap只需导出一次, 实际打印时在切片软件里阵列复制5个
+//
+// 建议打印方式: 树脂(SLA/DLP), 孔位/间距在2-7mm级别, FDM精度/公差不够。
 // ============================================================
 
 // ====可调参数====
 cube_size      = 25;     // 立方体外形边长
 wall           = 1.5;    // 外壳壁厚
 panel_t        = wall;   // 前面板厚度(与外壳一体打印时=wall)
+panel_area     = cube_size - 2*wall; // 面板内侧可用区域(=22, 四壁各留wall厚)
 
-// 按键区(十字布局)
-key_hole_d     = 4.0;    // 面板按键过孔直径(按键帽/actuator露出的孔, 实测后调整)
-key_pocket_w   = 4.6;    // 载板上按键本体方形卡槽边长(按实际SMD按键外壌+0.2mm公差)
-key_pocket_h   = 1.2;    // 卡槽深度(按键本体厚度, 实测后调整)
-key_pitch      = 7.0;    // 十字按键中心间距
+// 按键区(十字布局, 放大占满panel_area)
+key_cap_d      = 5.8;    // 面板外露"按键帽"直径(手指按压目标, 放大型)
+key_hole_d     = 6.2;    // 面板按键过孔直径(配合cap, 留0.4mm装配间隙)
+key_pitch      = 7.5;    // 十字按键中心间距(配合放大后尺寸占满22x22, 2*pitch+hole≈21)
+key_pocket_w   = 4.6;    // 载板上实际贴片按键本体方形卡槽边长(按真实器件尺寸! 不是cap尺寸)
+key_pocket_h   = 1.2;    // 卡槽深度(贴片按键本体厚度, 实测后调整)
+actuator_d     = 2.2;    // 载板上贯穿孔径, 给cap的顶杆穿过去压实际按键的小触点
 
-// LED区
-led_hole_d     = 3.2;    // 面板LED过孔直径(3mm LED留0.2mm装配间隙)
-led_pitch      = 6.0;    // 三颗LED间距
-led_row_y      = cube_size - 5; // LED排所在y坐标(顶部往下5mm)
+// 按键帽(cap, 单独打印, 装进面板孔里, 背面顶杆对准载板下面的实际按键)
+cap_t          = 1.6;    // cap本体厚度(含帽檐)
+cap_rim_d      = key_hole_d - 0.4;  // cap外径(略小于面板孔, 留滑动间隙)
+nub_d          = 1.8;    // cap背面顶杆直径(需比actuator_d略小, 可自由穿过)
+nub_h          = 0.8;    // cap背面顶杆长度: = 面板厚+载板前空隙+(载板厚-key_pocket_h)
+                          // 必须实测后调整, 太短按不到键, 太长会顶死按键常按状态!
+
+// LED: 放在十字按键之间的空隙里, 不强求精确曝光对孔, 能透光就行
+led_hole_d     = 2.5;    // 面板LED过孔(偏小也没关系, 只是透光)
+led_positions  = [[4.5,4.5], [-4.5,4.5], [4.5,-4.5]]; // 十字间隙里的3个安全位置(已避开按键卡槽)
 
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
-carrier_w      = 20;     // 载板宽
-carrier_h      = 20;     // 载板高
+carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
+carrier_h      = panel_area - 0.6;  // 载板高
 carrier_t      = 1.6;    // 载板厚度
 carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
@@ -50,15 +67,16 @@ screw_hole_d   = 1.8;    // 自攻螺丝过孔(配M2自攻螺丝)
 boss_d         = 4.0;
 
 // ====选择要渲染/导出的零件====
-// "shell"   外壳主体(含前面板按键/LED孔+USB开口+内部支柱)
-// "carrier" 载板(贴面板内侧, 卡住贴片按键)
-// "back"    后盖
-// "assembly" 三件装配预览(半透明外壳+载板+后盖, 仅用来肉眼检查对齐, 不要用它导出STL)
+// "shell"    外壳主体(含前面板按键/LED孔+USB开口+内部支柱)
+// "carrier"  载板(贴面板内侧, 卡住贴片按键)
+// "back"     后盖
+// "cap"      按键帽(打印1个, 切片软件里阵列复制5个)
+// "assembly" 装配预览(半透明, 仅肉眼检查对齐, 不要用它导出STL)
 part_to_render = "shell";
 
 // ============================================================
 module key_cross_positions(cx, cy) {
-    // 十字: 上下左右 + 中心, 返回5个位置
+    // 十字: 上下左右 + 中心, 返回5个位置, 正中心对齐(cx,cy), 不再偏移
     positions = [
         [cx, cy + key_pitch],   // 上
         [cx, cy - key_pitch],   // 下
@@ -69,10 +87,8 @@ module key_cross_positions(cx, cy) {
     for (p = positions) translate(p) children();
 }
 
-module led_positions(cy) {
-    cx = cube_size/2;
-    for (i = [-1,0,1])
-        translate([cx + i*led_pitch, cy]) children();
+module led_dots(cx, cy) {
+    for (p = led_positions) translate([cx + p[0], cy + p[1]]) children();
 }
 
 // ---------------- 外壳主体 ----------------
@@ -84,13 +100,13 @@ module shell() {
         translate([wall, wall, panel_t])
             cube([cube_size-2*wall, cube_size-2*wall, cube_size]);
 
-        // 前面板按键过孔(z方向贯穿前面板, 前面板是z=0那一面)
-        key_cross_positions(cube_size/2, cube_size/2 - 3)
-            translate([0,0,-1]) cylinder(d=key_hole_d, h=panel_t+2, $fn=32);
+        // 前面板按键过孔(放大, 占满panel_area, 居中对齐面板几何中心)
+        key_cross_positions(cube_size/2, cube_size/2)
+            translate([0,0,-1]) cylinder(d=key_hole_d, h=panel_t+2, $fn=48);
 
-        // LED过孔
-        led_positions(led_row_y)
-            translate([0,0,-1]) cylinder(d=led_hole_d, h=panel_t+2, $fn=32);
+        // LED过孔(十字间隙里)
+        led_dots(cube_size/2, cube_size/2)
+            translate([0,0,-1]) cylinder(d=led_hole_d, h=panel_t+2, $fn=24);
 
         // 侧面USB-C开口(假设开在x=0这一侧墙, 靠后部, 按实际ESP32位置调整y/z)
         translate([-1, (cube_size-usb_slot_w)/2, cube_size-esp32_t-3])
@@ -129,20 +145,18 @@ module carrier() {
         cube([carrier_w, carrier_h, carrier_t]);
 
         // 按键方形卡槽(从背面向正面挖, 只挖carrier_t的下半部分当卡槽,
-        // 让按键actuator能从正面pocket底部的小孔露出去顶住面板)
-        key_cross_positions(carrier_w/2, carrier_h/2 - 3)
+        // 卡住实际贴片按键本体, 尺寸=真实器件尺寸, 和放大的cap无关)
+        key_cross_positions(carrier_w/2, carrier_h/2)
             translate([-key_pocket_w/2, -key_pocket_w/2, carrier_t-key_pocket_h])
                 cube([key_pocket_w, key_pocket_w, key_pocket_h+0.5]);
 
-        // 对应每个按键中心贯穿孔(按键actuator从这里顶出去压面板)
-        key_cross_positions(carrier_w/2, carrier_h/2 - 3)
-            cylinder(d=key_hole_d-0.5, h=carrier_t+1, $fn=24);
+        // 对应每个按键中心的小贯穿孔(cap的顶杆从这里穿过去压实际按键触点)
+        key_cross_positions(carrier_w/2, carrier_h/2)
+            cylinder(d=actuator_d, h=carrier_t+1, $fn=16);
 
-        // LED孔(贯穿, 坐标换算到与shell()里led_row_y全局对齐)
-        led_local_y = led_row_y - (cube_size-carrier_h)/2;
-        for (i=[-1,0,1])
-            translate([carrier_w/2 + i*led_pitch, led_local_y, 0])
-                cylinder(d=led_hole_d, h=carrier_t+1, $fn=24);
+        // LED孔(贯穿, 坐标直接复用led_positions, 和shell()里用法一致, 天然对齐)
+        led_dots(carrier_w/2, carrier_h/2)
+            cylinder(d=led_hole_d, h=carrier_t+1, $fn=24);
 
         // 四角定位孔
         for (dx=[-1,1]) for (dy=[-1,1])
@@ -153,6 +167,19 @@ module carrier() {
         // 边缘走线缺口(让8根引线从载板侧边引出到ESP32)
         translate([carrier_w/2-wire_slot_w/2, -1, carrier_t-wire_slot_h])
             cube([wire_slot_w, 3, wire_slot_h+1]);
+    }
+}
+
+// ---------------- 按键帽(cap) ----------------
+// 放大的手指按压目标, 装进面板的key_hole_d孔里可自由上下滑动,
+// 背面的小顶杆(nub)穿过载板的actuator_d孔精确压住实际贴片按键的触点。
+module cap() {
+    union() {
+        // 帽体(露在面板外面的大圆饼, 带一点弧度更好按, 这里简化成平的)
+        cylinder(d=cap_rim_d, h=cap_t, $fn=48);
+        // 背面顶杆
+        translate([0,0,-nub_h])
+            cylinder(d=nub_d, h=nub_h, $fn=24);
     }
 }
 
@@ -174,10 +201,14 @@ module assembly_preview() {
         color("orange") carrier();
     translate([0.15, 0.15, cube_size-wall])
         color("lightblue") back_cover();
+    // 5个cap摆在对应按键孔位置(z方向抬到面板外侧, 便于肉眼看位置)
+    key_cross_positions(cube_size/2, cube_size/2)
+        translate([0,0,-cap_t]) color("yellow") cap();
 }
 
 // ============================================================
 if (part_to_render == "shell") shell();
 else if (part_to_render == "carrier") carrier();
 else if (part_to_render == "back") back_cover();
+else if (part_to_render == "cap") cap();
 else if (part_to_render == "assembly") assembly_preview();
