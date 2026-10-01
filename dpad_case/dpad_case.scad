@@ -1,15 +1,17 @@
 // ============================================================
-// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v2: 按键放大占满22x22)
+// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v4: 按真实按键datasheet重做载板卡槽)
 // 对应 firmware/esp32c3_5btn_3led_ble
 //   5键: GPIO0/1/3/4/10 (上下左右+中)
 //   3灯: GPIO2/6/7 (共用限流电阻, 分时复用)
 //
-// v2改动:
-//   - 十字按键整体放大, 占满面板22x22可用区域(之前是缩在一角的小按键)
-//   - 新增"按键帽(cap)"零件: 面板开大孔(手指目标更大), cap背面有个小顶杆
-//     精确顶在实际贴片按键(很小)的中心上, 兼顾手感和实际器件尺寸
-//   - LED改放在十字按键中间的空隙里, 不用再单独占一排位置,
-//     也不要求和光源精确对孔, 能透光看到亮点就行
+// v2改动: 十字按键放大占满22x22; 新增cap零件(面板大孔+小顶杆压实际按键); LED放到十字间隙里
+// v3改动: LED改回一排放在面板顶部; cap/面板孔缩小, 露出LED光线; 十字整体下移腾出LED排空间
+// v4改动(本次): 根据实拍datasheet量到的真实贴片按键尺寸(3.3x3.4x1.5mm本体,
+//   引脚左右伸出共4.0mm, 2mm按压圆点), 重做载板卡槽:
+//   - 左/中/右三键同排, 挖一条贯穿整个载板宽度的通槽, 兼做卡槽+两侧走线出口
+//   - 上/下两键各自开贴合尺寸的长方形卡槽, 并各引一条水平走线槽到右边缘
+//   - cap顶杆(nub)按"面板+载板零间隙贴合"的实际装配关系重新算短(0.3mm),
+//     不再按旧的"假设有空气间隙"设计
 //
 // 用法:
 //   1. 用 OpenSCAD (https://openscad.org) 打开本文件
@@ -33,16 +35,28 @@ key_cap_d      = 4.1;    // 面板外露"按键帽"直径(手指按压目标, �
 key_hole_d     = 4.5;    // 面板按键过孔直径(配合cap, 留0.4mm装配间隙)
 key_pitch      = 5.5;    // 十字按键中心间距
 key_cross_cy   = -1.7;   // 十字整体向下偏移(相对面板中心), 给顶部LED一排留空间
-key_pocket_w   = 4.6;    // 载板上实际贴片按键本体方形卡槽边长(按真实器件尺寸! 不是cap尺寸)
-key_pocket_h   = 1.2;    // 卡槽深度(贴片按键本体厚度, 实测后调整)
-actuator_d     = 2.2;    // 载板上贯穿孔径, 给cap的顶杆穿过去压实际按键的小触点
+
+// 实际贴片按键尺寸(来自实拍图实测: 3*3*1.5, 4脚左右两边伸出共4.0mm, 按压圆点约2mm)
+button_leg_x   = 4.0;    // 含引脚方向(左右)的总跨度
+button_body_y  = 3.4;    // 无引脚方向(上下)的本体宽度
+button_h       = 1.5;    // 按键总高度(贴装面到静止顶部)
+button_dome_d  = 2.0;    // 按压圆点直径
+pocket_clear   = 0.3;    // 卡槽各方向留的装配间隙
+pocket_len_x   = button_leg_x + pocket_clear;   // 卡槽长边(含引脚, 留间隙)
+pocket_w_y     = button_body_y + pocket_clear;  // 卡槽短边
+pocket_depth   = button_h + 0.2; // 卡槽深度(按键整体陷进去, 比本体深0.2mm方便安装)
+actuator_d     = 2.3;    // 载板上贯穿孔径(对准2mm圆点, 留0.3mm余量), cap顶杆由此穿过去压键
+
+wire_groove_w  = 1.3;    // 引脚走线槽宽(配合0.9mm硅胶线)
+wire_groove_depth = 1.0; // 走线槽深度(比按键卡槽浅, 只需过线)
 
 // 按键帽(cap, 单独打印, 装进面板孔里, 背面顶杆对准载板下面的实际按键)
 cap_t          = 1.6;    // cap本体厚度(含帽檐)
 cap_rim_d      = key_hole_d - 0.4;  // cap外径(略小于面板孔, 留滑动间隙)
-nub_d          = 1.8;    // cap背面顶杆直径(需比actuator_d略小, 可自由穿过)
-nub_h          = 0.8;    // cap背面顶杆长度: = 面板厚+载板前空隙+(载板厚-key_pocket_h)
-                          // 必须实测后调整, 太短按不到键, 太长会顶死按键常按状态!
+nub_d          = 2.0;    // cap背面顶杆直径(对准2mm圆点, 比actuator_d略小可自由穿过)
+nub_h          = 0.3;    // cap背面顶杆长度: 本设计面板+载板零间隙贴合,
+                          // = 卡槽深度(pocket_depth) - 按键实际高度(button_h) + 一点预压量
+                          // 理论值≈0.2mm, 这里给了0.3mm, 装配后太松/太紧都需要实测微调重新打印!
 
 // LED: 放回顶部一排(cap缩小后腾出的空间), 孔不用太大, 能看到光点就行
 led_hole_d     = 3.0;    // 面板LED过孔
@@ -53,7 +67,7 @@ led_positions  = [[-led_pitch,led_row_cy], [0,led_row_cy], [led_pitch,led_row_cy
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
 carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
 carrier_h      = panel_area - 0.6;  // 载板高
-carrier_t      = 1.6;    // 载板厚度
+carrier_t      = 2.2;    // 载板厚度(需 ≥ pocket_depth(1.7) + 0.4mm底板厚度)
 carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
 wire_slot_h    = 2;
@@ -143,33 +157,53 @@ module shell() {
 }
 
 // ---------------- 载板(贴片按键固定件) ----------------
+// 按键引脚统一朝左右(水平)摆放:
+//   - 左/中(OK)/右 三个键在同一水平线上, 直接用一条贯穿整个载板宽度的
+//     水平通槽来同时当"卡槽+走线槽"(反正都在同一行, 槽挖穿到两侧边缘,
+//     走线可以直接从左边或右边出去)
+//   - 上/下 两个键单独开按键形状的卡槽, 各自再引一条水平走线槽到右边缘
 module carrier() {
     difference() {
         cube([carrier_w, carrier_h, carrier_t]);
 
-        // 按键方形卡槽(从背面向正面挖, 只挖carrier_t的下半部分当卡槽,
-        // 卡住实际贴片按键本体, 尺寸=真实器件尺寸, 和放大的cap无关)
-        key_cross_positions(carrier_w/2, carrier_h/2 + key_cross_cy)
-            translate([-key_pocket_w/2, -key_pocket_w/2, carrier_t-key_pocket_h])
-                cube([key_pocket_w, key_pocket_w, key_pocket_h+0.5]);
+        cy_mid = carrier_h/2 + key_cross_cy;     // 左/中/右 所在的y坐标
+        cy_up  = cy_mid + key_pitch;             // 上键y坐标
+        cy_down= cy_mid - key_pitch;             // 下键y坐标
+        pocket_z0 = carrier_t - pocket_depth;    // 卡槽从正面(朝面板那面)往下挖
 
-        // 对应每个按键中心的小贯穿孔(cap的顶杆从这里穿过去压实际按键触点)
+        // 左/中/右共用的水平通槽(贯穿整个载板宽度, 兼作卡槽+走线槽)
+        translate([0, cy_mid - pocket_w_y/2, pocket_z0])
+            cube([carrier_w, pocket_w_y, pocket_depth+0.5]);
+
+        // 上键独立卡槽(按键实际外形: 长边=含引脚方向, 水平放置)
+        translate([carrier_w/2 - pocket_len_x/2, cy_up - pocket_w_y/2, pocket_z0])
+            cube([pocket_len_x, pocket_w_y, pocket_depth+0.5]);
+        // 上键走线槽(从卡槽右边引到载板右边缘, 槽浅一些够过线就行)
+        translate([carrier_w/2 + pocket_len_x/2, cy_up - wire_groove_w/2, carrier_t-wire_groove_depth])
+            cube([carrier_w, wire_groove_w, wire_groove_depth+0.5]);
+
+        // 下键独立卡槽
+        translate([carrier_w/2 - pocket_len_x/2, cy_down - pocket_w_y/2, pocket_z0])
+            cube([pocket_len_x, pocket_w_y, pocket_depth+0.5]);
+        // 下键走线槽(同样引到右边缘)
+        translate([carrier_w/2 + pocket_len_x/2, cy_down - wire_groove_w/2, carrier_t-wire_groove_depth])
+            cube([carrier_w, wire_groove_w, wire_groove_depth+0.5]);
+
+        // 5个按键中心的顶杆贯穿孔(对准实际按键的2mm圆点)
         key_cross_positions(carrier_w/2, carrier_h/2 + key_cross_cy)
             cylinder(d=actuator_d, h=carrier_t+1, $fn=16);
 
-        // LED孔(贯穿, 坐标直接复用led_positions, 和shell()里用法一致, 天然对齐)
+        // LED孔(贯穿)+ 一条水平走线槽方便LED引脚/导线引出到边缘
         led_dots(carrier_w/2, carrier_h/2)
             cylinder(d=led_hole_d, h=carrier_t+1, $fn=24);
+        translate([0, carrier_h/2+led_row_cy-wire_groove_w/2, carrier_t-wire_groove_depth])
+            cube([carrier_w, wire_groove_w, wire_groove_depth+0.5]);
 
         // 四角定位孔
         for (dx=[-1,1]) for (dy=[-1,1])
             translate([carrier_w/2+dx*(carrier_w/2-1.5),
                         carrier_h/2+dy*(carrier_h/2-1.5),0])
                 cylinder(d=carrier_peg_d, h=carrier_t+1, $fn=16);
-
-        // 边缘走线缺口(让8根引线从载板侧边引出到ESP32)
-        translate([carrier_w/2-wire_slot_w/2, -1, carrier_t-wire_slot_h])
-            cube([wire_slot_w, 3, wire_slot_h+1]);
     }
 }
 
