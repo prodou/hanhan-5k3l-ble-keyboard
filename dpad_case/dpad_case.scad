@@ -23,6 +23,9 @@
 //     让cap的顶杆穿过去压圆顶
 //   盖板(retainer)不再开过线孔, 而是在对应每个按键的引脚层位置整块镂空(不盖住),
 //   让载板上本来就敞开的引脚层保持敞开, 走线可以直接从背面任意方向出去。
+// v9改动(本次): 盖板的镂空改回小孔 —— v8整块镂空开口太大了, 改成只在
+//   引脚/引线实际露出的两端各开一个小孔(retainer_hole_d=1.4mm), 其余地方
+//   盖板正常贴住载板背面, 把按键稳稳挡住不会往后掉。
 //
 // 用法:
 //   1. 用 OpenSCAD (https://openscad.org) 打开本文件
@@ -92,6 +95,7 @@ carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 // 载板和盖板之间防止移动/被顶出来; 对应每个按键的引脚层位置整块镂空(不盖住),
 // 让载板本来就敞开的引脚层保持敞开, 走线可以直接从背面出去, 不需要额外开孔。
 retainer_t       = 1.0;   // 盖板厚度
+retainer_hole_d  = 1.4;   // 盖板上的过线孔径(只对准引脚/引线位置开小孔, 不整块镂空)
 retainer_peg_d   = carrier_peg_d - 0.2; // 盖板定位柱直径(插入载板定位孔背面那一截)
 retainer_peg_h   = 1.0;   // 盖板定位柱长度(载板定位孔总深carrier_t=2.2, 正面已被shell的peg占了1.0mm, 背面还剩1.2mm可插)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
@@ -236,8 +240,8 @@ module carrier() {
 }
 
 // ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
-// 整块板贴住载板背面, 对应每个按键"引脚层"的位置整块镂空(不盖住), 让载板上
-// 本来就敞开的引脚层保持敞开, 走线可以直接从背面任意方向出去, 不需要额外开孔。
+// 整块板贴住载板背面, 挡住载板的引脚层(按键靠在这块板上不会往后掉出去),
+// 只在每个按键引脚/引线实际露出的两端各开一个小孔走线, 不整块镂空。
 module retainer() {
     cx = carrier_w/2;
     cy = carrier_h/2 + key_cross_cy;
@@ -253,10 +257,11 @@ module retainer() {
 
         for (p = positions_oriented) {
             bx = p[0]; by = p[1]; vertical = p[2];
-            leg_px = vertical ? pocket_w : pocket_len;
-            leg_py = vertical ? pocket_len : pocket_w;
-            translate([bx-leg_px/2, by-leg_py/2, -1])
-                cube([leg_px, leg_py, retainer_t+2]);
+            hole_offset = pocket_len/2 - retainer_hole_d/2 - 0.3; // 贴着引脚层两端, 留点边
+            off = vertical ? [0, hole_offset] : [hole_offset, 0];
+            for (s=[-1,1])
+                translate([bx+s*off[0], by+s*off[1], -1])
+                    cylinder(d=retainer_hole_d, h=retainer_t+2, $fn=16);
         }
     }
     // 四角定位柱(从盖板正面往上凸, 插入载板定位孔背面那一截, 和shell的定位柱分别从两头顶住载板)
