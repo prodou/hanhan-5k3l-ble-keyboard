@@ -1,5 +1,5 @@
 // ============================================================
-// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v6: 台阶卡槽+转向+新增盖板, 根据实打样反馈重做)
+// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v7: 简化卡槽为贯穿式, 走线全部挪到盖板)
 // 对应 firmware/esp32c3_5btn_3led_ble
 //   5键: GPIO0/1/3/4/10 (上下左右+中)
 //   3灯: GPIO2/6/7 (共用限流电阻, 分时复用)
@@ -10,15 +10,13 @@
 //   引脚左右伸出共4.0mm, 2mm按压圆点), 重做载板卡槽
 // v5改动: 左右按键转90度(引脚变竖直), 同排三键从"引脚对引脚"变"本体对本体",
 //   腾出空间加大焊接预留; 每按键独立卡槽+两个过线孔
-// v6改动(本次, 根据打样实测反馈):
-//   - 卡槽改"台阶"结构: 实测发现引脚/焊点比本体底面低一截, 原来整槽同一深度
-//     会被引脚先顶住导致本体扣不到位; 现在中间本体部分挖浅台阶(窄边收紧到
-//     刚好放入的尺寸), 两端引脚区域直接挖穿到背面(legs可以自由沉下去不受阻挡,
-//     这段开孔本身兼做过线通道, 去掉了v5里单独打的过线孔)
-//   - 新增第5个零件 retainer(盖板): 贴在载板背面(靠电池那侧), 上面只开小孔走线,
-//     把按键夹在载板和盖板之间防止移动/被顶出来; 靠4个定位柱插入载板定位孔背面
-//     那一截(和shell的定位柱从两头分别顶住载板, 互不冲突)
-//   - cap背面顶杆暂不加凸点, 靠retainer整体压住按键更简单可靠
+// v6改动: 卡槽改成"台阶+深槽"结构试图解决引脚比本体低的问题, 新增盖板(retainer)
+//   —— 打样后发现引脚两侧那两个深槽做得太大太夸张, 偏离了"中间凹一点放进去"的本意
+// v7改动(本次, 按反馈简化): 卡槽直接还原成一个简单的矩形, 直接贯穿整个载板厚度
+//   (不再分台阶/深槽), 形状=按键壳体轮廓(窄边perp_margin收紧到贴合, 引脚方向
+//   leg_margin留够焊接空间)。按键前面靠面板/cap的顶杆顶住, 后面靠盖板(retainer)
+//   挡住不会往后掉, 载板只负责四周卡住不晃。走线孔全部挪到盖板上开(载板上完全
+//   不开过线孔/槽), 盖板上每个按键两端各开一个小孔(1.0mm)对准引脚位置走线。
 //
 // 用法:
 //   1. 用 OpenSCAD (https://openscad.org) 打开本文件
@@ -51,18 +49,15 @@ button_h       = 1.5;    // 按键总高度(贴装面到静止顶部)
 button_dome_d  = 2.0;    // 按压圆点直径
 actuator_d     = 2.3;    // 载板上贯穿孔径(对准2mm圆点, 留0.3mm余量), cap顶杆由此穿过去压键
 
-// v6: 卡槽改成"台阶"结构 —— 实测发现引脚(焊点)比本体底面低一截,
-// 之前整个卡槽挖成同一个深度, 导致引脚/焊点先触底, 把本体顶起来扣不到位。
-// 现在中间本体部分挖成浅一点的台阶(刚好卡住本体, 窄边收紧到贴合尺寸),
-// 两端引脚区域直接挖穿到载板背面(没有底, 引脚和焊点可以自由沉下去不受阻挡,
-// 同时这段开孔本身就是过线通道, 不再需要单独的过线孔), 焊线从背面绕到
-// 新增的盖板(retainer)上开的小孔穿出去。
+// v7改动: 还原成一个简单的卡槽(不再分台阶+深槽) —— 整个卡槽直接贯穿
+// 整个载板厚度, 形状刚好是按键壳体的轮廓(窄边收紧贴合, 引脚方向留够焊接空间)。
+// 这样按键前面靠面板/cap的顶杆压住顶不出去, 后面靠新增的盖板(retainer)挡住
+// 不会往后掉, 载板本身只负责卡住四周, 不用再纠结"引脚比本体低一截"的台阶问题。
+// 引脚焊线不在载板上开孔, 直接走盖板(retainer)上开的小孔出去。
 perp_margin    = 0.15;   // 窄边(垂直引脚方向)预留: 缩到刚好能放进去
 leg_margin     = 0.7;    // 引脚方向焊接预留空间(超出引脚尖端, 单边), 留大一点方便焊接不短路
-ledge_len      = button_body_x + 2*perp_margin;      // 中间本体台阶的长度(沿引脚方向)
-ledge_depth    = button_h + 0.15;                    // 本体台阶深度(贴面板那面往下挖, 不挖穿)
-pocket_perp_w  = button_body_y + 2*perp_margin;      // 台阶+两端引脚槽统一的宽度(垂直引脚方向)
-leg_slot_len   = (button_leg_x - button_body_x)/2 + leg_margin; // 单侧引脚槽长度(挖穿到背面)
+pocket_len     = button_leg_x + 2*leg_margin;   // 卡槽沿引脚方向的长度(含焊接预留)
+pocket_w       = button_body_y + 2*perp_margin; // 卡槽垂直引脚方向的宽度(贴合本体)
 
 wire_groove_w  = 1.3;    // LED引脚走线槽宽(配合0.9mm硅胶线)
 wire_groove_depth = 1.0; // 走线槽深度(比按键卡槽浅, 只需过线)
@@ -84,7 +79,7 @@ led_positions  = [[-led_pitch,led_row_cy], [0,led_row_cy], [led_pitch,led_row_cy
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
 carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
 carrier_h      = panel_area - 0.6;  // 载板高
-carrier_t      = 2.2;    // 载板厚度(需 ≥ ledge_depth(1.65) + 0.4mm底板厚度)
+carrier_t      = 2.2;    // 载板厚度(卡槽贯穿整个厚度, 这个值决定按键侧壁卡住的深度)
 carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 
 // 盖板(retainer, 新增第5个零件): 贴在载板背面(靠电池那一侧), 把按键夹在
@@ -181,27 +176,18 @@ module shell() {
         cube([cube_size-2*wall, esp32_w, 1]);
 }
 
-// 单个按键的"台阶"卡槽(vertical=false: 引脚水平/沿x方向; true: 引脚转90度/沿y方向)
-// 中间本体台阶=窄边收紧的浅坑(刚好卡住本体), 两端引脚区=挖穿到背面的深槽
-// (legs变低不会把本体顶起来, 同时兼做过线通道, 焊线从背面绕到盖板的小孔穿出)
+// 单个按键的卡槽: 贯穿整个载板厚度, 形状=按键壳体轮廓(窄边贴合, 引脚方向留焊接空间)
+// (vertical=false: 引脚水平/沿x方向; true: 引脚转90度/沿y方向)
+// 前面靠面板+cap顶杆压住, 后面靠retainer盖板挡住, 载板本身只负责四周卡住不晃。
 module key_pocket(cx, cy, vertical) {
-    // 中间本体台阶(浅, 不挖穿)
-    lx = vertical ? pocket_perp_w : ledge_len;
-    ly = vertical ? ledge_len : pocket_perp_w;
-    translate([cx-lx/2, cy-ly/2, carrier_t-ledge_depth])
-        cube([lx, ly, ledge_depth+0.5]);
-
-    // 两端引脚槽(挖穿到背面, 沿引脚方向各一段)
-    off = vertical ? [0, ledge_len/2 + leg_slot_len/2] : [ledge_len/2 + leg_slot_len/2, 0];
-    sx = vertical ? pocket_perp_w : leg_slot_len;
-    sy = vertical ? leg_slot_len : pocket_perp_w;
-    for (s=[-1,1])
-        translate([cx+s*off[0]-sx/2, cy+s*off[1]-sy/2, 0])
-            cube([sx, sy, carrier_t+0.5]);
+    px = vertical ? pocket_w : pocket_len;
+    py = vertical ? pocket_len : pocket_w;
+    translate([cx-px/2, cy-py/2, -0.5])
+        cube([px, py, carrier_t+1]);
 }
 
 // ---------------- 载板(贴片按键固定件) ----------------
-// 5个按键各自独立开"台阶"卡槽, 上/下/中 三键引脚保持水平(H),
+// 5个按键各自独立开卡槽(贯穿整个载板厚度), 上/下/中 三键引脚保持水平(H),
 // 左/右 两键转90度变成引脚竖直(V) —— 这样同一排的左/中/右三键之间
 // 就不再是"引脚对引脚"占满4.0mm宽度, 而是"本体对本体"只占3.4mm宽度,
 // 省出来的空间正好用来加大 leg_margin, 让焊接/走线更宽松不容易短路。
@@ -216,10 +202,6 @@ module carrier() {
         key_pocket(cx-key_pitch, cy, true);   // 左(转90度)
         key_pocket(cx+key_pitch, cy, true);   // 右(转90度)
         key_pocket(cx, cy, false);            // 中(OK)
-
-        // 5个按键中心的顶杆贯穿孔(对准实际按键的2mm圆点, 按键是圆形触点不受朝向影响)
-        key_cross_positions(cx, cy)
-            cylinder(d=actuator_d, h=carrier_t+1, $fn=16);
 
         // LED孔(贯穿)+ 一条水平走线槽方便LED引脚/导线引出
         led_dots(carrier_w/2, carrier_h/2)
@@ -236,8 +218,8 @@ module carrier() {
 }
 
 // ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
-// 整块实心板(比载板稍大一圈更好压住边缘), 只在每个按键两端引脚槽对应位置
-// 开小孔走线, 中间按键本体台阶部分完全被挡住(不需要开孔, 台阶本身已经封底)。
+// 整块实心板贴住载板背面, 挡住5个贯穿卡槽(按键靠在这块板上不会往后掉出去),
+// 只在每个按键两端引脚位置开小孔走线, 中间(本体正对的地方)不开孔。
 module retainer() {
     cx = carrier_w/2;
     cy = carrier_h/2 + key_cross_cy;
@@ -253,8 +235,8 @@ module retainer() {
 
         for (p = positions_oriented) {
             bx = p[0]; by = p[1]; vertical = p[2];
-            off = vertical ? [0, ledge_len/2 + leg_slot_len/2]
-                           : [ledge_len/2 + leg_slot_len/2, 0];
+            hole_offset = pocket_len/2 - retainer_hole_d/2 - 0.2; // 贴着卡槽两端, 留点边
+            off = vertical ? [0, hole_offset] : [hole_offset, 0];
             for (s=[-1,1])
                 translate([bx+s*off[0], by+s*off[1], -1])
                     cylinder(d=retainer_hole_d, h=retainer_t+2, $fn=16);
@@ -270,7 +252,7 @@ module retainer() {
 
 // ---------------- 按键帽(cap) ----------------
 // 放大的手指按压目标, 装进面板的key_hole_d孔里可自由上下滑动,
-// 背面的小顶杆(nub)穿过载板的actuator_d孔精确压住实际贴片按键的触点。
+// 背面的小顶杆(nub)伸进载板的卡槽(现在整个卡槽都是通的), 精确压住实际贴片按键的触点。
 module cap() {
     union() {
         // 帽体(露在面板外面的大圆饼, 带一点弧度更好按, 这里简化成平的)
