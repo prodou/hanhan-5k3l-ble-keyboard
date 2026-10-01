@@ -1,17 +1,24 @@
 // ============================================================
-// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v4: 按真实按键datasheet重做载板卡槽)
+// HanHan 5K3L — 25mm立方体 外壳 + 载板 参数化设计 (v6: 台阶卡槽+转向+新增盖板, 根据实打样反馈重做)
 // 对应 firmware/esp32c3_5btn_3led_ble
 //   5键: GPIO0/1/3/4/10 (上下左右+中)
 //   3灯: GPIO2/6/7 (共用限流电阻, 分时复用)
 //
 // v2改动: 十字按键放大占满22x22; 新增cap零件(面板大孔+小顶杆压实际按键); LED放到十字间隙里
 // v3改动: LED改回一排放在面板顶部; cap/面板孔缩小, 露出LED光线; 十字整体下移腾出LED排空间
-// v4改动(本次): 根据实拍datasheet量到的真实贴片按键尺寸(3.3x3.4x1.5mm本体,
-//   引脚左右伸出共4.0mm, 2mm按压圆点), 重做载板卡槽:
-//   - 左/中/右三键同排, 挖一条贯穿整个载板宽度的通槽, 兼做卡槽+两侧走线出口
-//   - 上/下两键各自开贴合尺寸的长方形卡槽, 并各引一条水平走线槽到右边缘
-//   - cap顶杆(nub)按"面板+载板零间隙贴合"的实际装配关系重新算短(0.3mm),
-//     不再按旧的"假设有空气间隙"设计
+// v4改动: 根据实拍datasheet量到的真实贴片按键尺寸(3.3x3.4x1.5mm本体,
+//   引脚左右伸出共4.0mm, 2mm按压圆点), 重做载板卡槽
+// v5改动: 左右按键转90度(引脚变竖直), 同排三键从"引脚对引脚"变"本体对本体",
+//   腾出空间加大焊接预留; 每按键独立卡槽+两个过线孔
+// v6改动(本次, 根据打样实测反馈):
+//   - 卡槽改"台阶"结构: 实测发现引脚/焊点比本体底面低一截, 原来整槽同一深度
+//     会被引脚先顶住导致本体扣不到位; 现在中间本体部分挖浅台阶(窄边收紧到
+//     刚好放入的尺寸), 两端引脚区域直接挖穿到背面(legs可以自由沉下去不受阻挡,
+//     这段开孔本身兼做过线通道, 去掉了v5里单独打的过线孔)
+//   - 新增第5个零件 retainer(盖板): 贴在载板背面(靠电池那侧), 上面只开小孔走线,
+//     把按键夹在载板和盖板之间防止移动/被顶出来; 靠4个定位柱插入载板定位孔背面
+//     那一截(和shell的定位柱从两头分别顶住载板, 互不冲突)
+//   - cap背面顶杆暂不加凸点, 靠retainer整体压住按键更简单可靠
 //
 // 用法:
 //   1. 用 OpenSCAD (https://openscad.org) 打开本文件
@@ -42,16 +49,20 @@ button_leg_x   = 4.0;    // 含引脚方向的总跨度(引脚两边各伸出0.3
 button_body_y  = 3.4;    // 本体宽度(垂直引脚方向)
 button_h       = 1.5;    // 按键总高度(贴装面到静止顶部)
 button_dome_d  = 2.0;    // 按压圆点直径
-leg_margin     = 0.7;    // 引脚方向焊接预留空间(超出引脚尖端, 单边), 比之前大很多方便焊接不短路
-perp_margin    = 0.4;    // 垂直引脚方向预留空间(单边)
-pocket_depth   = button_h + 0.3; // 卡槽深度(比本体深0.3mm, 兼顾焊点鼓起)
 actuator_d     = 2.3;    // 载板上贯穿孔径(对准2mm圆点, 留0.3mm余量), cap顶杆由此穿过去压键
 
-// 左右两个按键的朝向整体转90度(引脚变成竖直方向), 这样"左中右"同一排三个键
-// 彼此之间就不再是引脚对引脚(占用方向=4.0mm)而是本体对本体(占用方向=3.4mm),
-// 焊接空间互不干扰, 不容易碰到短路。上/下/中三键保持引脚水平不变。
-wire_hole_d      = 1.8;  // 引脚过线孔径(每个按键2个, 分别贯穿到载板背面, 每个按键独立不共用槽)
-wire_hole_offset = 1.7;  // 过线孔中心到按键中心的距离(沿引脚方向)
+// v6: 卡槽改成"台阶"结构 —— 实测发现引脚(焊点)比本体底面低一截,
+// 之前整个卡槽挖成同一个深度, 导致引脚/焊点先触底, 把本体顶起来扣不到位。
+// 现在中间本体部分挖成浅一点的台阶(刚好卡住本体, 窄边收紧到贴合尺寸),
+// 两端引脚区域直接挖穿到载板背面(没有底, 引脚和焊点可以自由沉下去不受阻挡,
+// 同时这段开孔本身就是过线通道, 不再需要单独的过线孔), 焊线从背面绕到
+// 新增的盖板(retainer)上开的小孔穿出去。
+perp_margin    = 0.15;   // 窄边(垂直引脚方向)预留: 缩到刚好能放进去
+leg_margin     = 0.7;    // 引脚方向焊接预留空间(超出引脚尖端, 单边), 留大一点方便焊接不短路
+ledge_len      = button_body_x + 2*perp_margin;      // 中间本体台阶的长度(沿引脚方向)
+ledge_depth    = button_h + 0.15;                    // 本体台阶深度(贴面板那面往下挖, 不挖穿)
+pocket_perp_w  = button_body_y + 2*perp_margin;      // 台阶+两端引脚槽统一的宽度(垂直引脚方向)
+leg_slot_len   = (button_leg_x - button_body_x)/2 + leg_margin; // 单侧引脚槽长度(挖穿到背面)
 
 wire_groove_w  = 1.3;    // LED引脚走线槽宽(配合0.9mm硅胶线)
 wire_groove_depth = 1.0; // 走线槽深度(比按键卡槽浅, 只需过线)
@@ -73,8 +84,15 @@ led_positions  = [[-led_pitch,led_row_cy], [0,led_row_cy], [led_pitch,led_row_cy
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
 carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
 carrier_h      = panel_area - 0.6;  // 载板高
-carrier_t      = 2.2;    // 载板厚度(需 ≥ pocket_depth(1.8) + 0.4mm底板厚度)
+carrier_t      = 2.2;    // 载板厚度(需 ≥ ledge_depth(1.65) + 0.4mm底板厚度)
 carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
+
+// 盖板(retainer, 新增第5个零件): 贴在载板背面(靠电池那一侧), 把按键夹在
+// 载板和盖板之间防止移动/被顶出来; 盖板上只开小孔走引线, 不需要对应面板孔。
+retainer_t       = 1.0;   // 盖板厚度
+retainer_hole_d  = 1.0;   // 盖板上的过线孔径(对准每个按键两端的引脚槽, 刚好让单根0.9mm线穿过)
+retainer_peg_d   = carrier_peg_d - 0.2; // 盖板定位柱直径(插入载板定位孔背面那一截)
+retainer_peg_h   = 1.0;   // 盖板定位柱长度(载板定位孔总深carrier_t=2.2, 正面已被shell的peg占了1.0mm, 背面还剩1.2mm可插)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
 wire_slot_h    = 2;
 
@@ -90,11 +108,12 @@ screw_hole_d   = 1.8;    // 自攻螺丝过孔(配M2自攻螺丝)
 boss_d         = 4.0;
 
 // ====选择要渲染/导出的零件====
-// "shell"    外壳主体(含前面板按键/LED孔+USB开口+内部支柱)
-// "carrier"  载板(贴面板内侧, 卡住贴片按键)
-// "back"     后盖
-// "cap"      按键帽(打印1个, 切片软件里阵列复制5个)
-// "assembly" 装配预览(半透明, 仅肉眼检查对齐, 不要用它导出STL)
+// "shell"     外壳主体(含前面板按键/LED孔+USB开口+内部支柱)
+// "carrier"   载板(贴面板内侧, 卡住贴片按键)
+// "retainer"  盖板(贴载板背面, 夹住按键防止移动, 打印1个)
+// "back"      后盖
+// "cap"       按键帽(打印1个, 切片软件里阵列复制5个)
+// "assembly"  装配预览(半透明, 仅肉眼检查对齐, 不要用它导出STL)
 part_to_render = "shell";
 
 // ============================================================
@@ -162,27 +181,27 @@ module shell() {
         cube([cube_size-2*wall, esp32_w, 1]);
 }
 
-// 单个按键的卡槽+过线孔(vertical=false: 引脚水平/沿x方向; true: 引脚转90度/沿y方向)
-// 卡槽尺寸已经比实际按键大一圈(leg_margin/perp_margin), 专门留出来方便焊接,
-// 过线孔是每个按键独立贯穿到载板背面的两个小孔(对应两侧引脚各自的导线),
-// 不同按键/不同腿之间完全由实体载板材料隔开, 不会出现焊点/导线互相碰到短路的情况。
+// 单个按键的"台阶"卡槽(vertical=false: 引脚水平/沿x方向; true: 引脚转90度/沿y方向)
+// 中间本体台阶=窄边收紧的浅坑(刚好卡住本体), 两端引脚区=挖穿到背面的深槽
+// (legs变低不会把本体顶起来, 同时兼做过线通道, 焊线从背面绕到盖板的小孔穿出)
 module key_pocket(cx, cy, vertical) {
-    len_leg  = button_leg_x + 2*leg_margin;    // 沿引脚方向的卡槽总长(含焊接预留)
-    len_perp = button_body_y + 2*perp_margin;  // 垂直引脚方向的卡槽总宽
-    px = vertical ? len_perp : len_leg;
-    py = vertical ? len_leg  : len_perp;
+    // 中间本体台阶(浅, 不挖穿)
+    lx = vertical ? pocket_perp_w : ledge_len;
+    ly = vertical ? ledge_len : pocket_perp_w;
+    translate([cx-lx/2, cy-ly/2, carrier_t-ledge_depth])
+        cube([lx, ly, ledge_depth+0.5]);
 
-    translate([cx-px/2, cy-py/2, carrier_t-pocket_depth])
-        cube([px, py, pocket_depth+0.5]);
-
-    off = vertical ? [0, wire_hole_offset] : [wire_hole_offset, 0];
+    // 两端引脚槽(挖穿到背面, 沿引脚方向各一段)
+    off = vertical ? [0, ledge_len/2 + leg_slot_len/2] : [ledge_len/2 + leg_slot_len/2, 0];
+    sx = vertical ? pocket_perp_w : leg_slot_len;
+    sy = vertical ? leg_slot_len : pocket_perp_w;
     for (s=[-1,1])
-        translate([cx+s*off[0], cy+s*off[1], 0])
-            cylinder(d=wire_hole_d, h=carrier_t+1, $fn=16);
+        translate([cx+s*off[0]-sx/2, cy+s*off[1]-sy/2, 0])
+            cube([sx, sy, carrier_t+0.5]);
 }
 
 // ---------------- 载板(贴片按键固定件) ----------------
-// 5个按键各自独立开卡槽(不再共用通槽), 上/下/中 三键引脚保持水平(H),
+// 5个按键各自独立开"台阶"卡槽, 上/下/中 三键引脚保持水平(H),
 // 左/右 两键转90度变成引脚竖直(V) —— 这样同一排的左/中/右三键之间
 // 就不再是"引脚对引脚"占满4.0mm宽度, 而是"本体对本体"只占3.4mm宽度,
 // 省出来的空间正好用来加大 leg_margin, 让焊接/走线更宽松不容易短路。
@@ -208,12 +227,45 @@ module carrier() {
         translate([0, carrier_h/2+led_row_cy-wire_groove_w/2, carrier_t-wire_groove_depth])
             cube([carrier_w, wire_groove_w, wire_groove_depth+0.5]);
 
-        // 四角定位孔
+        // 四角定位孔(背面留给retainer的定位柱插入, 正面留给shell的定位柱插入)
         for (dx=[-1,1]) for (dy=[-1,1])
             translate([carrier_w/2+dx*(carrier_w/2-1.5),
                         carrier_h/2+dy*(carrier_h/2-1.5),0])
                 cylinder(d=carrier_peg_d, h=carrier_t+1, $fn=16);
     }
+}
+
+// ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
+// 整块实心板(比载板稍大一圈更好压住边缘), 只在每个按键两端引脚槽对应位置
+// 开小孔走线, 中间按键本体台阶部分完全被挡住(不需要开孔, 台阶本身已经封底)。
+module retainer() {
+    cx = carrier_w/2;
+    cy = carrier_h/2 + key_cross_cy;
+    positions_oriented = [
+        [cx, cy+key_pitch, false],  // 上
+        [cx, cy-key_pitch, false],  // 下
+        [cx-key_pitch, cy, true],   // 左
+        [cx+key_pitch, cy, true],   // 右
+        [cx, cy, false]             // 中
+    ];
+    difference() {
+        cube([carrier_w, carrier_h, retainer_t]);
+
+        for (p = positions_oriented) {
+            bx = p[0]; by = p[1]; vertical = p[2];
+            off = vertical ? [0, ledge_len/2 + leg_slot_len/2]
+                           : [ledge_len/2 + leg_slot_len/2, 0];
+            for (s=[-1,1])
+                translate([bx+s*off[0], by+s*off[1], -1])
+                    cylinder(d=retainer_hole_d, h=retainer_t+2, $fn=16);
+        }
+    }
+    // 四角定位柱(从盖板正面往上凸, 插入载板定位孔背面那一截, 和shell的定位柱分别从两头顶住载板)
+    for (dx=[-1,1]) for (dy=[-1,1])
+        translate([carrier_w/2+dx*(carrier_w/2-1.5),
+                    carrier_h/2+dy*(carrier_h/2-1.5),
+                    retainer_t])
+            cylinder(d=retainer_peg_d, h=retainer_peg_h, $fn=16);
 }
 
 // ---------------- 按键帽(cap) ----------------
@@ -245,6 +297,8 @@ module assembly_preview() {
     color("gray", 0.3) shell();
     translate([cube_size/2-carrier_w/2, cube_size/2-carrier_h/2, panel_t])
         color("orange") carrier();
+    translate([cube_size/2-carrier_w/2, cube_size/2-carrier_h/2, panel_t+carrier_t])
+        color("green") retainer();
     translate([0.15, 0.15, cube_size-wall])
         color("lightblue") back_cover();
     // 5个cap摆在对应按键孔位置(z方向抬到面板外侧, 便于肉眼看位置)
@@ -255,6 +309,7 @@ module assembly_preview() {
 // ============================================================
 if (part_to_render == "shell") shell();
 else if (part_to_render == "carrier") carrier();
+else if (part_to_render == "retainer") retainer();
 else if (part_to_render == "back") back_cover();
 else if (part_to_render == "cap") cap();
 else if (part_to_render == "assembly") assembly_preview();
