@@ -28,10 +28,11 @@ wall           = 1.5;    // 外壳壁厚
 panel_t        = wall;   // 前面板厚度(与外壳一体打印时=wall)
 panel_area     = cube_size - 2*wall; // 面板内侧可用区域(=22, 四壁各留wall厚)
 
-// 按键区(十字布局, 放大占满panel_area)
-key_cap_d      = 5.8;    // 面板外露"按键帽"直径(手指按压目标, 放大型)
-key_hole_d     = 6.2;    // 面板按键过孔直径(配合cap, 留0.4mm装配间隙)
-key_pitch      = 7.5;    // 十字按键中心间距(配合放大后尺寸占满22x22, 2*pitch+hole≈21)
+// 按键区(十字布局, 缩小一点, 给顶部LED一排腾出空间)
+key_cap_d      = 4.1;    // 面板外露"按键帽"直径(手指按压目标, 比v2缩小)
+key_hole_d     = 4.5;    // 面板按键过孔直径(配合cap, 留0.4mm装配间隙)
+key_pitch      = 5.5;    // 十字按键中心间距
+key_cross_cy   = -1.7;   // 十字整体向下偏移(相对面板中心), 给顶部LED一排留空间
 key_pocket_w   = 4.6;    // 载板上实际贴片按键本体方形卡槽边长(按真实器件尺寸! 不是cap尺寸)
 key_pocket_h   = 1.2;    // 卡槽深度(贴片按键本体厚度, 实测后调整)
 actuator_d     = 2.2;    // 载板上贯穿孔径, 给cap的顶杆穿过去压实际按键的小触点
@@ -43,9 +44,11 @@ nub_d          = 1.8;    // cap背面顶杆直径(需比actuator_d略小, 可自
 nub_h          = 0.8;    // cap背面顶杆长度: = 面板厚+载板前空隙+(载板厚-key_pocket_h)
                           // 必须实测后调整, 太短按不到键, 太长会顶死按键常按状态!
 
-// LED: 放在十字按键之间的空隙里, 不强求精确曝光对孔, 能透光就行
-led_hole_d     = 2.5;    // 面板LED过孔(偏小也没关系, 只是透光)
-led_positions  = [[4.5,4.5], [-4.5,4.5], [4.5,-4.5]]; // 十字间隙里的3个安全位置(已避开按键卡槽)
+// LED: 放回顶部一排(cap缩小后腾出的空间), 孔不用太大, 能看到光点就行
+led_hole_d     = 3.0;    // 面板LED过孔
+led_pitch      = 6.0;    // 三颗LED间距
+led_row_cy     = 8.2;    // LED排相对面板中心的y偏移(正值=靠上)
+led_positions  = [[-led_pitch,led_row_cy], [0,led_row_cy], [led_pitch,led_row_cy]];
 
 // 载板(carrier plate, 单独打印, 贴在面板内侧)
 carrier_w      = panel_area - 0.6;  // 载板宽(比面板可用区域小0.6mm装配间隙)
@@ -101,7 +104,7 @@ module shell() {
             cube([cube_size-2*wall, cube_size-2*wall, cube_size]);
 
         // 前面板按键过孔(放大, 占满panel_area, 居中对齐面板几何中心)
-        key_cross_positions(cube_size/2, cube_size/2)
+        key_cross_positions(cube_size/2, cube_size/2 + key_cross_cy)
             translate([0,0,-1]) cylinder(d=key_hole_d, h=panel_t+2, $fn=48);
 
         // LED过孔(十字间隙里)
@@ -146,12 +149,12 @@ module carrier() {
 
         // 按键方形卡槽(从背面向正面挖, 只挖carrier_t的下半部分当卡槽,
         // 卡住实际贴片按键本体, 尺寸=真实器件尺寸, 和放大的cap无关)
-        key_cross_positions(carrier_w/2, carrier_h/2)
+        key_cross_positions(carrier_w/2, carrier_h/2 + key_cross_cy)
             translate([-key_pocket_w/2, -key_pocket_w/2, carrier_t-key_pocket_h])
                 cube([key_pocket_w, key_pocket_w, key_pocket_h+0.5]);
 
         // 对应每个按键中心的小贯穿孔(cap的顶杆从这里穿过去压实际按键触点)
-        key_cross_positions(carrier_w/2, carrier_h/2)
+        key_cross_positions(carrier_w/2, carrier_h/2 + key_cross_cy)
             cylinder(d=actuator_d, h=carrier_t+1, $fn=16);
 
         // LED孔(贯穿, 坐标直接复用led_positions, 和shell()里用法一致, 天然对齐)
@@ -202,7 +205,7 @@ module assembly_preview() {
     translate([0.15, 0.15, cube_size-wall])
         color("lightblue") back_cover();
     // 5个cap摆在对应按键孔位置(z方向抬到面板外侧, 便于肉眼看位置)
-    key_cross_positions(cube_size/2, cube_size/2)
+    key_cross_positions(cube_size/2, cube_size/2 + key_cross_cy)
         translate([0,0,-cap_t]) color("yellow") cap();
 }
 
