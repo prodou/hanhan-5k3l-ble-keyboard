@@ -95,7 +95,8 @@ carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 // 载板和盖板之间防止移动/被顶出来; 对应每个按键的引脚层位置整块镂空(不盖住),
 // 让载板本来就敞开的引脚层保持敞开, 走线可以直接从背面出去, 不需要额外开孔。
 retainer_t       = 1.0;   // 盖板厚度
-retainer_hole_d  = 1.4;   // 盖板上的过线孔径(只对准引脚/引线位置开小孔, 不整块镂空)
+retainer_slot_w  = 1.4;   // 盖板过线长条孔的短边宽度(沿引脚方向)
+retainer_slot_len= 2.6;   // 盖板过线长条孔的长边长度(沿垂直引脚方向, 一次性盖住两条引脚/引线)
 retainer_peg_d   = carrier_peg_d - 0.2; // 盖板定位柱直径(插入载板定位孔背面那一截)
 retainer_peg_h   = 1.0;   // 盖板定位柱长度(载板定位孔总深carrier_t=2.2, 正面已被shell的peg占了1.0mm, 背面还剩1.2mm可插)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
@@ -241,7 +242,18 @@ module carrier() {
 
 // ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
 // 整块板贴住载板背面, 挡住载板的引脚层(按键靠在这块板上不会往后掉出去),
-// 只在每个按键引脚/引线实际露出的两端各开一个小孔走线, 不整块镂空。
+// 只在每个按键引脚/引线实际露出的两端各开一个长条孔走线(一次盖住两条引脚/引线),
+// 不整块镂空。
+module wire_slot(h, vertical) {
+    // 长条孔: 长边(retainer_slot_len)始终垂直于引脚方向, 短边(retainer_slot_w)沿引脚方向
+    half = (retainer_slot_len - retainer_slot_w) / 2;
+    offs = vertical ? [[-half,0],[half,0]] : [[0,-half],[0,half]];
+    hull()
+        for (o = offs)
+            translate([o[0], o[1], 0])
+                cylinder(d=retainer_slot_w, h=h, $fn=16);
+}
+
 module retainer() {
     cx = carrier_w/2;
     cy = carrier_h/2 + key_cross_cy;
@@ -257,11 +269,11 @@ module retainer() {
 
         for (p = positions_oriented) {
             bx = p[0]; by = p[1]; vertical = p[2];
-            hole_offset = pocket_len/2 - retainer_hole_d/2 - 0.3; // 贴着引脚层两端, 留点边
+            hole_offset = pocket_len/2 - retainer_slot_w/2 - 0.3; // 贴着引脚层两端, 留点边
             off = vertical ? [0, hole_offset] : [hole_offset, 0];
             for (s=[-1,1])
                 translate([bx+s*off[0], by+s*off[1], -1])
-                    cylinder(d=retainer_hole_d, h=retainer_t+2, $fn=16);
+                    wire_slot(retainer_t+2, vertical);
         }
     }
     // 四角定位柱(从盖板正面往上凸, 插入载板定位孔背面那一截, 和shell的定位柱分别从两头顶住载板)
