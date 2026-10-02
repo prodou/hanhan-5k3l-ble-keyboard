@@ -97,6 +97,7 @@ carrier_peg_d  = 1.6;    // 载板定位柱直径(对应外壳内侧定位孔)
 retainer_t       = 1.0;   // 盖板厚度
 retainer_slot_w  = 1.4;   // 盖板过线长条孔的短边宽度(沿引脚方向)
 retainer_slot_len= 2.6;   // 盖板过线长条孔的长边长度(沿垂直引脚方向, 一次性盖住两条引脚/引线)
+retainer_led_d   = led_hole_d + 0.3; // 盖板上LED过孔径(比面板LED孔略大留装配间隙)
 retainer_peg_d   = carrier_peg_d - 0.2; // 盖板定位柱直径(插入载板定位孔背面那一截)
 retainer_peg_h   = 1.0;   // 盖板定位柱长度(载板定位孔总深carrier_t=2.2, 正面已被shell的peg占了1.0mm, 背面还剩1.2mm可插)
 wire_slot_w    = 3;      // 载板边缘走线缺口宽度(5键+3灯共8根线从此出)
@@ -243,7 +244,8 @@ module carrier() {
 // ---------------- 盖板(retainer, 贴在载板背面, 夹住按键防止移动) ----------------
 // 整块板贴住载板背面, 挡住载板的引脚层(按键靠在这块板上不会往后掉出去),
 // 只在每个按键引脚/引线实际露出的两端各开一个长条孔走线(一次盖住两条引脚/引线),
-// 不整块镂空。
+// 不整块镂空。另外3颗LED各开一个过孔(LED本体比载板厚, 一截会伸到盖板这边,
+// 不开孔会被盖板堵住, 引脚也要从这里继续穿出去).
 module wire_slot(h, vertical) {
     // 长条孔: 长边(retainer_slot_len)始终垂直于引脚方向, 短边(retainer_slot_w)沿引脚方向
     half = (retainer_slot_len - retainer_slot_w) / 2;
@@ -275,6 +277,11 @@ module retainer() {
                 translate([bx+s*off[0], by+s*off[1], -1])
                     wire_slot(retainer_t+2, vertical);
         }
+
+        // LED过孔(对准carrier上的led_dots位置, 贯穿盖板, 让LED本体/引脚继续穿过去)
+        led_dots(carrier_w/2, carrier_h/2)
+            translate([0,0,-1])
+                cylinder(d=retainer_led_d, h=retainer_t+2, $fn=24);
     }
     // 四角定位柱(从盖板正面往上凸, 插入载板定位孔背面那一截, 和shell的定位柱分别从两头顶住载板)
     for (dx=[-1,1]) for (dy=[-1,1])
