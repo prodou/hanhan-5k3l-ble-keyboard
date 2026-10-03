@@ -19,6 +19,7 @@
 //
 import Cocoa
 import ApplicationServices
+import CoreBluetooth
 
 // macOS 标准虚拟键码(来自 Carbon HIToolbox/Events.h 的 kVK_F13~kVK_F17)
 let VK_F13: Int64 = 0x69
@@ -80,11 +81,155 @@ let kDefaultsTargetBundleIDKey = "targetBundleID"
 let kDefaultsTargetNameKey = "targetDisplayName"
 let kDefaultsKeyActionsKey = "keyActions" // [String(keycode): PresetAction.rawValue]
 
+// MARK: - LED 蓝牙控制(独立于 HID 连接, 直接用 CoreBluetooth 连固件自定义 LED 特征值)
+
+// 预设 LED 效果(对应固件: byte0=mask, byte1=mode)
+enum LedPreset: String, CaseIterable {
+    case off = "全灭"
+    case allOn = "三灯都亮(常亮)"
+    case led0Only = "只亮 LED0"
+    case led1Only = "只亮 LED1"
+    case led2Only = "只亮 LED2"
+    case blinkAll = "三灯一起闪烁"
+    case chase = "流水灯"
+
+    var payload: (mask: UInt8, mode: UInt8) {
+        switch self {
+        case .off:      return (0b000, 0) // mode 0 = 全灭
+        case .allOn:    return (0b111, 1) // mode 1 = 常亮
+        case .led0Only: return (0b001, 1)
+        case .led1Only: return (0b010, 1)
+        case .led2Only: return (0b100, 1)
+        case .blinkAll: return (0b111, 2) // mode 2 = 闪烁
+        case .chase:    return (0b111, 3) // mode 3 = 流水灯(固件内部忽略 mask)
+        }
+    }
+}
+
+final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    // 必须和固件 setupBle() 里 NimBLEDevice::init(...) 的名字、Service/Characteristic UUID 完全一致
+    static let deviceNamePrefix = "HanHan 5K3L"
+    static let ledServiceUUID = CBUUID(string: "6E400100-B5A3-F393-E0A9-E50E24DCCA9E")
+    static let ledCharUUID = CBUUID(string: "6E400101-B5A3-F393-E0A9-E50E24DCCA9E")
+
+    private var central: CBCentralManager!
+    private var peripheral: CBPeripheral?
+    private var ledChar: CBCharacteristic?
+
+    // 连上设备前如果调用了 send(), 先记下来, 连接建立后自动补发
+    private var pendingPayload: (mask: UInt8, mode: UInt8)?
+
+    var onStatusChanged: (() -> Void)?
+
+    private(set) var statusText: String = "未初始化"
+
+    override init() {
+        super.init()
+        central = CBCentralManager(delegate: self, queue: nil)
+    }
+
+    private func setStatus(_ text: String) {
+        statusText = text
+        NSLog("[HanHanAgent][BLE] \(text)")
+        DispatchQueue.main.async { [weak self] in
+            self?.onStatusChanged?()
+        }
+    }
+
+    func startScan() {
+        guard central.state == .poweredOn else {
+            setStatus("蓝牙未就绪(state=\(central.state.rawValue)), 稍后再试")
+            return
+        }
+        if let p = peripheral, p.state == .connected {
+            setStatus("已连接: \(p.name ?? "?")")
+            return
+        }
+        setStatus("搜索中...")
+        central.scanForPeripherals(withServices: nil, options: nil)
+    }
+
+    func send(mask: UInt8, mode: UInt8) {
+        guard let p = peripheral, p.state == .connected, let chr = ledChar else {
+            // 还没连上: 记下待发送内容, 顺便触发一次扫描连接
+            pendingPayload = (mask, mode)
+            startScan()
+            return
+        }
+        let data = Data([mask, mode])
+        let writeType: CBCharacteristicWriteType = chr.properties.contains(.write) ? .withResponse : .withoutResponse
+        p.writeValue(data, for: chr, type: writeType)
+        setStatus("已发送 mask=0b\(String(mask, radix: 2)) mode=\(mode)")
+    }
+
+    // MARK: CBCentralManagerDelegate
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            setStatus("蓝牙已就绪")
+        case .poweredOff:
+            setStatus("蓝牙未开启")
+        case .unauthorized:
+            setStatus("没有蓝牙权限, 请在 系统设置->隐私与安全性->蓝牙 中允许 HanHan Agent")
+        default:
+            setStatus("蓝牙状态: \(central.state.rawValue)")
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        let name = peripheral.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
+        guard let n = name, n.hasPrefix(Self.deviceNamePrefix) else { return }
+        central.stopScan()
+        self.peripheral = peripheral
+        peripheral.delegate = self
+        setStatus("找到 \(n), 连接中...")
+        central.connect(peripheral, options: nil)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        setStatus("已连接 \(peripheral.name ?? "?"), 查找服务中...")
+        peripheral.discoverServices([Self.ledServiceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        setStatus("连接失败: \(error?.localizedDescription ?? "未知错误")")
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        ledChar = nil
+        setStatus("已断开")
+    }
+
+    // MARK: CBPeripheralDelegate
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let services = peripheral.services else { return }
+        for service in services where service.uuid == Self.ledServiceUUID {
+            peripheral.discoverCharacteristics([Self.ledCharUUID], for: service)
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard let chars = service.characteristics else { return }
+        for c in chars where c.uuid == Self.ledCharUUID {
+            ledChar = c
+            setStatus("就绪: \(peripheral.name ?? "?")")
+            if let pending = pendingPayload {
+                pendingPayload = nil
+                send(mask: pending.mask, mode: pending.mode)
+            }
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var eventTap: CFMachPort?
     var runLoopSource: CFRunLoopSource?
     var settingsWindowController: SettingsWindowController?
+    let bleManager = HanHanBLEManager()
 
     // 当前目标: 具体某一个正在运行的 App 实例(按 pid 精确定位, 不是笼统的 bundle id)
     var targetApp: NSRunningApplication? {
@@ -113,6 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restorePersistedTargetIfStillRunning()
         ensureAccessibilityPermission()
         setupEventTap()
+
+        bleManager.onStatusChanged = { [weak self] in self?.rebuildMenu() }
+        bleManager.startScan()
 
         // App 列表可能随时启动/退出, 定期刷新菜单
         Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
@@ -233,6 +381,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(openNewItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        // ---- LED 控制(直接用 CoreBluetooth 连固件的自定义 LED 特征值, 和 HID 键盘连接是两回事) ----
+        let ledItem = NSMenuItem(title: "LED 控制", action: nil, keyEquivalent: "")
+        let ledSubmenu = NSMenu()
+
+        let ledStatusLine = NSMenuItem(title: "状态: \(bleManager.statusText)", action: nil, keyEquivalent: "")
+        ledStatusLine.isEnabled = false
+        ledSubmenu.addItem(ledStatusLine)
+        ledSubmenu.addItem(NSMenuItem(title: "重新搜索设备", action: #selector(ledRescan), keyEquivalent: ""))
+        ledSubmenu.addItem(NSMenuItem.separator())
+        for preset in LedPreset.allCases {
+            let item = NSMenuItem(title: preset.rawValue, action: #selector(ledApplyPreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset
+            ledSubmenu.addItem(item)
+        }
+        ledItem.submenu = ledSubmenu
+        menu.addItem(ledItem)
+
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "按键动作设置...", action: #selector(openSettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出 HanHan Agent", action: #selector(quit), keyEquivalent: "q"))
@@ -258,6 +426,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.targetApp = runningApp
             }
         }
+    }
+
+    @objc func ledRescan() {
+        bleManager.startScan()
+    }
+
+    @objc func ledApplyPreset(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? LedPreset else { return }
+        let (mask, mode) = preset.payload
+        bleManager.send(mask: mask, mode: mode)
     }
 
     @objc func openSettings() {

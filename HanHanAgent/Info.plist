@@ -24,5 +24,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>HanHan Agent 需要蓝牙权限来连接 HanHan 5K3L 键盘并控制它的 LED 效果。</string>
 </dict>
 </plist>

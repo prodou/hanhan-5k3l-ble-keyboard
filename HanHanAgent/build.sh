@@ -7,7 +7,7 @@ APP="build/HanHan Agent.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc main.swift -o "$APP/Contents/MacOS/HanHanAgent" -framework Cocoa -framework ApplicationServices
+swiftc main.swift -o "$APP/Contents/MacOS/HanHanAgent" -framework Cocoa -framework ApplicationServices -framework CoreBluetooth
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
