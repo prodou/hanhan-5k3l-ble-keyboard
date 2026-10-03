@@ -5,12 +5,39 @@
 - `firmware/esp32c3_5btn_3led_ble/` — ESP32-C3 固件(Arduino + NimBLE-Arduino)
   - 5 个按键(GPIO0/1/3/4/10)→ BLE HID 键盘, 发送 F13~F17
   - 3 个 LED(GPIO2/6/7, 共用一颗限流电阻)→ 独立的自定义 BLE GATT 特征值控制,
-    按 3ms 亮 / 6ms 灭 时分复用, 避免同时点亮
+    支持常亮/闪烁/流水灯几种效果模式(见下方"LED 效果协议"), 硬件层固定
+    10ms 一帧、每颗灯专属 3ms 导通窗口, **任意模式下单颗 LED 占空比恒定 <=30%**,
+    且任意时刻最多一颗导通, 避免共用限流电阻叠加电流
   - 启用 BLE 绑定(bonding), 支持断开自动重连
   - **同时长按 GPIO0 + GPIO1 五秒** → 断开当前连接并清空所有绑定记录, 方便换设备配对
 - `HanHanAgent/` — macOS 菜单栏小工具(Swift)
   - 全局拦截来自本设备的 F13~F17 按键(不会传到当前聚焦的窗口)
   - 背景转发(不切换焦点)到用户在菜单里选定的目标 App
+- `tools/led_test.py` — 独立的 LED 效果测试脚本(需要 `pip install bleak`,
+  且运行环境要有正常的图形登录会话以便弹出蓝牙权限提示)
+
+## LED 效果协议
+
+自定义 Service/Characteristic UUID 见固件源码注释。写入 2 字节:
+
+| byte0 (mask)                  | byte1 (mode) | 效果 |
+|--------------------------------|--------------|------|
+| bit0/1/2 = LED0/1/2 是否参与   | 0            | 全灭(忽略 mask) |
+|                                 | 1            | 常亮(mask 选中的灯常亮, `0b111` = 三灯都亮) |
+|                                 | 2            | 闪烁(mask 选中的灯一起慢闪: 亮400ms/灭400ms) |
+|                                 | 3            | 流水灯(忽略 mask, LED0→LED1→LED2 依次点亮, 每步150ms) |
+
+只写 1 个字节时视为旧协议, 自动当作 `mode=1`(常亮)处理。
+
+测试示例:
+
+```bash
+pip install bleak
+python3 tools/led_test.py static 0b111   # 三灯都亮
+python3 tools/led_test.py blink 0b011    # LED0/LED1 一起慢闪
+python3 tools/led_test.py chase          # 流水灯
+python3 tools/led_test.py off            # 全灭
+```
 
 ## 固件编译/烧录
 

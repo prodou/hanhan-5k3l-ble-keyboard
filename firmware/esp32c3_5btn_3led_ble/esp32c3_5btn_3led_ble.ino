@@ -18,18 +18,25 @@
     2. 3 个 LED 是"自定义功能指示灯",与系统的大小写/数字/滚动锁无关,
        所以**不使用**标准 HID 键盘 LED 输出报文(会被系统/其它键盘联动误触发),
        改用一个独立的**自定义 BLE GATT 特征值**(单独 Service/Characteristic),
-       电脑端程序连接 BLE 后直接写这个特征值 1 个字节:
-         bit0 = LED0(GPIO2) 使能
-         bit1 = LED1(GPIO6) 使能
-         bit2 = LED2(GPIO7) 使能
-    3. 被使能的 LED 按 3ms 亮 / 6ms 灭 的时序点亮;
-       由于 3 个 LED 共用同一颗限流电阻(共地),不能同时点亮多颗,
-       所以用 9ms = 3ms x 3 时隙 的轮询方式错开点亮:
-         时隙0 (0~3ms)  : 只有 LED0 允许亮
-         时隙1 (3~6ms)  : 只有 LED1 允许亮
-         时隙2 (6~9ms)  : 只有 LED2 允许亮
-       某个 LED 未被使能时,轮到它的时隙也保持灭。
-       这样每个使能的 LED 自身呈现"亮3ms灭6ms"的观感,且任意时刻最多一颗在导通。
+       电脑端程序连接 BLE 后直接写这个特征值 2 个字节:
+         byte0 = mask, bit0/1/2 分别对应 LED0(GPIO2)/LED1(GPIO6)/LED2(GPIO7) 是否参与显示
+         byte1 = mode, 效果模式:
+           0 = 全灭(忽略 mask)
+           1 = 常亮  (mask 选中的灯常亮显示, 例: mask=0b111 即"三灯都亮")
+           2 = 闪烁  (mask 选中的灯整体慢闪: 亮400ms / 灭400ms)
+           3 = 流水灯(忽略 mask, LED0->LED1->LED2->LED0 顺序点亮, 每步150ms)
+         只发 1 个字节时视为旧协议, 自动当作 byte1=1(常亮) 处理, 保持向后兼容。
+    3. **无论处于哪种效果模式, 任何一颗 LED 在任意时刻的占空比都不超过 30%**:
+       硬件上 3 颗 LED 共用同一限流电阻到 GND, 为避免叠加电流,
+       采用 10ms 为一帧、每颗 LED 专属 3ms 导通窗口(10ms 内只占 30%)的分时复用:
+         时隙0 (0~3ms)   : 只有 LED0 允许导通
+         时隙1 (3~6ms)   : 只有 LED1 允许导通
+         时隙2 (6~9ms)   : 只有 LED2 允许导通
+         (9~10ms)        : 全灭(帧间隔)
+       "常亮"/"闪烁"/"流水灯"等上层效果只决定某颗 LED 在当前宏观时刻
+       是否参与这个分时复用(即是否允许在轮到它的 3ms 窗口导通),
+       从不会让任何一颗 LED 跳过分时直接常通, 从根本上保证 <=30% 占空,
+       任意时刻最多同时一颗导通。
 
   Arduino IDE 设置:
     开发板:  ESP32C3 Dev Module
@@ -91,17 +98,29 @@ volatile bool bleConnected = false;
 #define LED_SERVICE_UUID "6E400100-B5A3-F393-E0A9-E50E24DCCA9E"
 #define LED_STATUS_CHAR_UUID "6E400101-B5A3-F393-E0A9-E50E24DCCA9E"
 
-volatile bool ledEnabled[3] = {false, false, false};
+// 效果模式: 0=全灭 1=常亮 2=闪烁 3=流水灯
+enum LedMode : uint8_t {
+  LED_MODE_OFF = 0,
+  LED_MODE_STATIC = 1,
+  LED_MODE_BLINK = 2,
+  LED_MODE_CHASE = 3,
+};
+
+volatile bool ledEnabled[3] = {false, false, false}; // mask: 常亮/闪烁模式下哪些灯参与显示
+volatile uint8_t ledMode = LED_MODE_STATIC;
 
 class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
     std::string v = pChr->getValue();
-    if (v.length() > 0) {
-      uint8_t b = (uint8_t)v[0];
-      ledEnabled[0] = b & 0x01;
-      ledEnabled[1] = b & 0x02;
-      ledEnabled[2] = b & 0x04;
+    if (v.length() == 0) {
+      return;
     }
+    uint8_t mask = (uint8_t)v[0];
+    ledEnabled[0] = mask & 0x01;
+    ledEnabled[1] = mask & 0x02;
+    ledEnabled[2] = mask & 0x04;
+    // 只写 1 字节时视为旧协议, 默认常亮模式, 保持向后兼容
+    ledMode = (v.length() >= 2) ? (uint8_t)v[1] : LED_MODE_STATIC;
   }
 };
 
@@ -214,9 +233,19 @@ void removeKey(uint8_t keycode) {
 // ------------------- LED 配置 -------------------
 const uint8_t LED_PINS[3] = {2, 6, 7};
 
-const uint32_t SLOT_MS = 3;      // 每个时隙 3ms
-uint8_t currentSlot = 0;
-uint32_t lastSlotMs = 0;
+// 硬件分时复用: 每帧 10ms, 每颗 LED 专属 3ms 导通窗口 -> 占空比固定 30%,
+// 帧内剩余 1ms 全灭作为间隔, 任意时刻最多一颗 LED 导通。
+const uint32_t FRAME_MS = 10;
+const uint32_t SLOT_ON_MS = 3;   // 30% of FRAME_MS
+uint32_t frameStartMs = 0;
+
+// 闪烁效果: 慢速整体亮/灭切换(这里的"亮"仍然要经过上面的 30% 分时窗口, 不是常通)
+const uint32_t BLINK_PERIOD_MS = 800; // 亮400ms / 灭400ms
+
+// 流水灯效果: 依次点亮 LED0 -> LED1 -> LED2 -> LED0 ...
+const uint32_t CHASE_STEP_MS = 150;
+uint8_t chaseIndex = 0;
+uint32_t chaseLastStepMs = 0;
 
 void setupBle() {
   NimBLEDevice::init("HanHan 5K3L v0.1");
@@ -297,7 +326,8 @@ void setup() {
   setupBle();
   Serial.println("[BOOT] setup() complete, entering loop()");
 
-  lastSlotMs = millis();
+  frameStartMs = millis();
+  chaseLastStepMs = millis();
 }
 
 void scanButtons() {
@@ -331,13 +361,49 @@ void scanButtons() {
 
 void updateLeds() {
   uint32_t now = millis();
-  if (now - lastSlotMs >= SLOT_MS) {
-    lastSlotMs += SLOT_MS;
-    currentSlot = (currentSlot + 1) % 3;
+
+  // ---- 流水灯宏观步进(每 CHASE_STEP_MS 切换一次高亮的灯) ----
+  if (now - chaseLastStepMs >= CHASE_STEP_MS) {
+    chaseLastStepMs += CHASE_STEP_MS;
+    chaseIndex = (chaseIndex + 1) % 3;
+  }
+
+  // ---- 闪烁宏观相位(慢速整体 亮/灭 切换) ----
+  bool blinkPhaseOn = (now % BLINK_PERIOD_MS) < (BLINK_PERIOD_MS / 2);
+
+  // ---- 根据当前效果模式, 决定每颗 LED 此刻"是否允许参与下面的 30% 占空分时窗口" ----
+  // 注意: 这里只决定"允许/不允许", 从不跳过分时窗口直接常通,
+  // 所以无论哪种模式, 单颗 LED 的占空比恒定 <=30%。
+  bool wantOn[3] = {false, false, false};
+  switch (ledMode) {
+    case LED_MODE_OFF:
+      // 全灭, wantOn 保持全 false
+      break;
+    case LED_MODE_BLINK:
+      for (uint8_t i = 0; i < 3; i++) wantOn[i] = ledEnabled[i] && blinkPhaseOn;
+      break;
+    case LED_MODE_CHASE:
+      wantOn[chaseIndex] = true; // 忽略 mask, 依次只点亮一颗
+      break;
+    case LED_MODE_STATIC:
+    default:
+      for (uint8_t i = 0; i < 3; i++) wantOn[i] = ledEnabled[i];
+      break;
+  }
+
+  // ---- 硬件 30% 占空分时窗口: 10ms 一帧, 每颗灯专属 3ms 导通窗口, 帧尾 1ms 全灭间隔 ----
+  uint32_t framePos = (now - frameStartMs) % FRAME_MS; // 0..9
+  int8_t slotIndex = -1; // -1 表示处于帧尾间隔, 任何灯都不允许导通
+  if (framePos < SLOT_ON_MS) {
+    slotIndex = 0;
+  } else if (framePos < 2 * SLOT_ON_MS) {
+    slotIndex = 1;
+  } else if (framePos < 3 * SLOT_ON_MS) {
+    slotIndex = 2;
   }
 
   for (uint8_t i = 0; i < 3; i++) {
-    bool on = (i == currentSlot) && ledEnabled[i];
+    bool on = (slotIndex == (int8_t)i) && wantOn[i];
     digitalWrite(LED_PINS[i], on ? HIGH : LOW);
   }
 }
