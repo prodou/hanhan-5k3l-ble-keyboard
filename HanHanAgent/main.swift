@@ -79,7 +79,14 @@ enum PresetAction: String, CaseIterable {
 let kDefaultsTargetPidKey = "targetPid"
 let kDefaultsTargetBundleIDKey = "targetBundleID"
 let kDefaultsTargetNameKey = "targetDisplayName"
+let kDefaultsTargetModeKey = "targetMode" // TargetMode.rawValue
 let kDefaultsKeyActionsKey = "keyActions" // [String(keycode): PresetAction.rawValue]
+
+// 目标模式: 固定某个 App 实例, 或者跟随当前最前台的窗口(全局, 谁在最前面就发给谁)
+enum TargetMode: String {
+    case specificApp
+    case frontmost
+}
 
 // MARK: - LED 蓝牙控制(独立于 HID 连接, 直接用 CoreBluetooth 连固件自定义 LED 特征值)
 
@@ -294,6 +301,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // 目标模式: 固定 App 实例 / 跟随当前最前台窗口(全局)
+    var targetMode: TargetMode = .specificApp {
+        didSet {
+            UserDefaults.standard.set(targetMode.rawValue, forKey: kDefaultsTargetModeKey)
+            rebuildMenu()
+        }
+    }
+
     // 每个物理按键 -> 预设动作, 默认原样转发
     var keyActions: [Int64: PresetAction] = [:] {
         didSet {
@@ -331,11 +346,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func restorePersistedTargetIfStillRunning() {
+        if let modeRaw = UserDefaults.standard.string(forKey: kDefaultsTargetModeKey),
+           let mode = TargetMode(rawValue: modeRaw) {
+            targetMode = mode
+        }
         let pid = UserDefaults.standard.integer(forKey: kDefaultsTargetPidKey)
         guard pid != 0, let running = NSRunningApplication(processIdentifier: pid_t(pid)), !running.isTerminated else {
             return
         }
         targetApp = running
+    }
+
+    // 实际转发目标: 全局模式下取"当前最前台的窗口"所属 App(不含本 App 自己,
+    // 因为是 LSUIElement 菜单栏小工具, 正常情况下不会变成前台); 否则用固定选中的实例。
+    func resolveForwardTarget() -> NSRunningApplication? {
+        switch targetMode {
+        case .frontmost:
+            guard let front = NSWorkspace.shared.frontmostApplication, !front.isTerminated,
+                  front.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+                return nil
+            }
+            return front
+        case .specificApp:
+            guard let app = targetApp, !app.isTerminated else { return nil }
+            return app
+        }
     }
 
     // MARK: - 权限
@@ -368,11 +403,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func currentTargetDisplayName() -> String {
-        guard let app = targetApp else { return "未设置" }
-        if app.isTerminated {
-            return "(已退出的实例)"
+        switch targetMode {
+        case .frontmost:
+            return "跟随前台窗口(全局)"
+        case .specificApp:
+            guard let app = targetApp else { return "未设置" }
+            if app.isTerminated {
+                return "(已退出的实例)"
+            }
+            return "\(app.localizedName ?? "?") · pid \(app.processIdentifier)"
         }
-        return "\(app.localizedName ?? "?") · pid \(app.processIdentifier)"
     }
 
     func rebuildMenu() {
@@ -386,6 +426,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusLine = NSMenuItem(title: "当前目标: \(currentTargetDisplayName())", action: nil, keyEquivalent: "")
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // ---- 全局模式: 不固定某个 App, 按键发给"当前最前台的窗口" ----
+        let frontmostItem = NSMenuItem(title: "跟随前台窗口(全局)", action: #selector(selectFrontmostMode), keyEquivalent: "")
+        frontmostItem.target = self
+        frontmostItem.state = (targetMode == .frontmost) ? .on : .off
+        menu.addItem(frontmostItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -409,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let item = NSMenuItem(title: title, action: #selector(selectRunningTarget(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = app
-            item.state = (app.processIdentifier == targetApp?.processIdentifier) ? .on : .off
+            item.state = (targetMode == .specificApp && app.processIdentifier == targetApp?.processIdentifier) ? .on : .off
             if let icon = app.icon {
                 icon.size = NSSize(width: 16, height: 16)
                 item.image = icon
@@ -493,7 +541,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    @objc func selectFrontmostMode() {
+        targetMode = .frontmost
+    }
+
     @objc func selectRunningTarget(_ sender: NSMenuItem) {
+        targetMode = .specificApp
         targetApp = sender.representedObject as? NSRunningApplication
     }
 
@@ -508,6 +561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("[HanHanAgent] 打开新实例失败: \(error.localizedDescription)")
                     return
                 }
+                self?.targetMode = .specificApp
                 self?.targetApp = runningApp
             }
         }
@@ -623,8 +677,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("[HanHanAgent] 命中按键 keycode=\(keycode) type=\(type == .keyDown ? "down" : "up")")
 
         // 命中目标键: 按预设动作转发到目标 App 实例(不抢焦点), 并吞掉原始事件
-        guard let target = targetApp, !target.isTerminated else {
-            NSLog("[HanHanAgent] 没有可用目标(targetApp 为空或已退出), 按键被吞掉但不会转发")
+        guard let target = resolveForwardTarget() else {
+            NSLog("[HanHanAgent] 没有可用目标(targetApp 为空/已退出, 或全局模式下取不到前台 App), 按键被吞掉但不会转发")
             return nil
         }
         let pid = target.processIdentifier
