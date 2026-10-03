@@ -165,7 +165,20 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
             setStatus("已连接: \(p.name ?? "?")")
             return
         }
-        setStatus("搜索中...")
+
+        // 优先复用系统已经建立好的那条蓝牙连接(比如系统设置->蓝牙里配对的 HID 键盘连接),
+        // 不用自己再单独扫描建立第二条连接, 更稳定也不依赖固件"同时支持多条连接"的逻辑。
+        let already = central.retrieveConnectedPeripherals(withServices: [Self.ledServiceUUID])
+        if let existing = already.first {
+            scanTimeoutWorkItem?.cancel()
+            self.peripheral = existing
+            existing.delegate = self
+            setStatus("复用已有连接: \(existing.name ?? "?"), 查找服务中...")
+            central.connect(existing, options: nil)
+            return
+        }
+
+        setStatus("搜索中...(未发现已有系统连接, 尝试直接扫描)")
         central.scanForPeripherals(withServices: nil, options: nil)
 
         // 搜索超时保护: 避免因为设备不在范围内/未上电等原因导致永远卡在"搜索中"
