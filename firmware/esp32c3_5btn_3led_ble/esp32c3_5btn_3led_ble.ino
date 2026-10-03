@@ -26,17 +26,26 @@
            2 = 闪烁  (mask 选中的灯整体慢闪: 亮400ms / 灭400ms)
            3 = 流水灯(忽略 mask, LED0->LED1->LED2->LED0 顺序点亮, 每步150ms)
          只发 1 个字节时视为旧协议, 自动当作 byte1=1(常亮) 处理, 保持向后兼容。
+       另有一个**亮度校准特征值**(同 Service 下), 写 3 个字节:
+         byte0/1/2 = LED0/1/2 的占空比百分比(0~30, 超过 30 会被固件夹到 30),
+         用于抵消不同颜色 LED 正向压降不同导致的肉眼亮度不一致, 默认全部 30。
     3. **无论处于哪种效果模式, 任何一颗 LED 在任意时刻的占空比都不超过 30%**:
        硬件上 3 颗 LED 共用同一限流电阻到 GND, 为避免叠加电流,
-       采用 10ms 为一帧、每颗 LED 专属 3ms 导通窗口(10ms 内只占 30%)的分时复用:
-         时隙0 (0~3ms)   : 只有 LED0 允许导通
-         时隙1 (3~6ms)   : 只有 LED1 允许导通
-         时隙2 (6~9ms)   : 只有 LED2 允许导通
+       采用 10ms 为一帧、每颗 LED 专属 3ms 导通窗口(10ms 内最多占 30%)的分时复用,
+       窗口内实际导通时长再按各自的"亮度校准百分比"进一步缩短(微秒级精度):
+         时隙0 (0~3ms)   : 只有 LED0 允许导通, 导通时长 = 3ms * 校准值/30
+         时隙1 (3~6ms)   : 只有 LED1 允许导通, 导通时长 = 3ms * 校准值/30
+         时隙2 (6~9ms)   : 只有 LED2 允许导通, 导通时长 = 3ms * 校准值/30
          (9~10ms)        : 全灭(帧间隔)
        "常亮"/"闪烁"/"流水灯"等上层效果只决定某颗 LED 在当前宏观时刻
-       是否参与这个分时复用(即是否允许在轮到它的 3ms 窗口导通),
+       是否参与这个分时复用(即是否允许在轮到它的窗口导通),
        从不会让任何一颗 LED 跳过分时直接常通, 从根本上保证 <=30% 占空,
        任意时刻最多同时一颗导通。
+    4. 支持**同时**连接手机/电脑(HID 键盘)和 HanHan Agent(LED 控制)两条独立
+       BLE 连接: 每次有新连接建立后, 只要当前连接数还没到上限(2), 就会自动
+       重新开启广播以便接纳另一条连接; loop() 里也有兜底逻辑, 只要连接数未满
+       且当前没有在广播, 就会定期自动重新开启广播, 避免因为某次异常导致
+       广播停掉后再也连不上。
 
   Arduino IDE 设置:
     开发板:  ESP32C3 Dev Module
@@ -97,6 +106,7 @@ volatile bool bleConnected = false;
 // 独立于 HID 服务, 使用自定义 128-bit UUID, 与系统键盘锁定状态完全隔离。
 #define LED_SERVICE_UUID "6E400100-B5A3-F393-E0A9-E50E24DCCA9E"
 #define LED_STATUS_CHAR_UUID "6E400101-B5A3-F393-E0A9-E50E24DCCA9E"
+#define LED_CALIB_CHAR_UUID "6E400102-B5A3-F393-E0A9-E50E24DCCA9E"
 
 // 效果模式: 0=全灭 1=常亮 2=闪烁 3=流水灯
 enum LedMode : uint8_t {
@@ -106,8 +116,13 @@ enum LedMode : uint8_t {
   LED_MODE_CHASE = 3,
 };
 
+const uint8_t LED_DUTY_MAX_PERCENT = 30; // 硬性上限, 任何校准值都不能超过这个
+
 volatile bool ledEnabled[3] = {false, false, false}; // mask: 常亮/闪烁模式下哪些灯参与显示
 volatile uint8_t ledMode = LED_MODE_STATIC;
+// 每颗 LED 的占空比校准值(0~30), 用于抵消不同颜色 LED 正向压降不同导致的肉眼亮度差异,
+// 默认都给满上限 30, 后续由 HanHan Agent 下发校准后调低偏亮的那几颗。
+volatile uint8_t ledDutyPercent[3] = {LED_DUTY_MAX_PERCENT, LED_DUTY_MAX_PERCENT, LED_DUTY_MAX_PERCENT};
 
 class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
@@ -121,15 +136,41 @@ class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
     ledEnabled[2] = mask & 0x04;
     // 只写 1 字节时视为旧协议, 默认常亮模式, 保持向后兼容
     ledMode = (v.length() >= 2) ? (uint8_t)v[1] : LED_MODE_STATIC;
+    Serial.printf("[LED] write mask=0b%03b mode=%u\n", mask & 0x07, ledMode);
   }
 };
+
+class LedCalibCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
+    std::string v = pChr->getValue();
+    for (size_t i = 0; i < 3 && i < v.length(); i++) {
+      uint8_t pct = (uint8_t)v[i];
+      if (pct > LED_DUTY_MAX_PERCENT) pct = LED_DUTY_MAX_PERCENT;
+      ledDutyPercent[i] = pct;
+    }
+    Serial.printf("[LED] calibration duty%% = %u, %u, %u\n",
+                  ledDutyPercent[0], ledDutyPercent[1], ledDutyPercent[2]);
+  }
+};
+
+NimBLECharacteristic *pLedCalibChr = nullptr;
+
+// 同时允许的最大连接数(1 条给手机/电脑的 HID 键盘连接, 1 条给 HanHan Agent 的 LED 控制连接)
+const uint8_t MAX_DESIRED_CONNECTIONS = 2;
 
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &connInfo) override {
     bleConnected = true;
+    Serial.printf("[BLE] onConnect, connectedCount=%u\n", server->getConnectedCount());
+    // 只要还没到连接数上限, 继续广播以便接纳另一条连接(例如手机当键盘用的同时,
+    // HanHan Agent 还要单独连一条 BLE 来控制 LED)
+    if (server->getConnectedCount() < MAX_DESIRED_CONNECTIONS) {
+      NimBLEDevice::startAdvertising();
+    }
   }
   void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
-    bleConnected = false;
+    bleConnected = server->getConnectedCount() > 0;
+    Serial.printf("[BLE] onDisconnect reason=%d, connectedCount=%u\n", reason, server->getConnectedCount());
     NimBLEDevice::startAdvertising();
   }
 };
@@ -233,11 +274,14 @@ void removeKey(uint8_t keycode) {
 // ------------------- LED 配置 -------------------
 const uint8_t LED_PINS[3] = {2, 6, 7};
 
-// 硬件分时复用: 每帧 10ms, 每颗 LED 专属 3ms 导通窗口 -> 占空比固定 30%,
+// 硬件分时复用: 每帧 10ms, 每颗 LED 专属 3ms 导通窗口 -> 占空比上限固定 30%,
 // 帧内剩余 1ms 全灭作为间隔, 任意时刻最多一颗 LED 导通。
-const uint32_t FRAME_MS = 10;
-const uint32_t SLOT_ON_MS = 3;   // 30% of FRAME_MS
-uint32_t frameStartMs = 0;
+// 窗口内真正导通的时长再按各自的 ledDutyPercent[]/30 比例进一步缩短(微秒级精度),
+// 用来校准不同颜色 LED 因正向压降不同造成的肉眼亮度差异, 同时保证实际占空比
+// 永远 <= 这个 30% 的硬性上限。
+const uint32_t FRAME_US = 10000;
+const uint32_t SLOT_ON_US = 3000;   // 30% of FRAME_US
+uint32_t frameStartUs = 0;
 
 // 闪烁效果: 慢速整体亮/灭切换(这里的"亮"仍然要经过上面的 30% 分时窗口, 不是常通)
 const uint32_t BLINK_PERIOD_MS = 800; // 亮400ms / 灭400ms
@@ -278,6 +322,15 @@ void setupBle() {
     NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
   );
   pLedStatusChr->setCallbacks(new LedStatusCallbacks());
+  pLedCalibChr = pLedService->createCharacteristic(
+    LED_CALIB_CHAR_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::READ
+  );
+  pLedCalibChr->setCallbacks(new LedCalibCallbacks());
+  {
+    uint8_t initVal[3] = {ledDutyPercent[0], ledDutyPercent[1], ledDutyPercent[2]};
+    pLedCalibChr->setValue(initVal, 3);
+  }
   pLedService->start();
   Serial.println("[BLE] led service started");
 
@@ -326,7 +379,7 @@ void setup() {
   setupBle();
   Serial.println("[BOOT] setup() complete, entering loop()");
 
-  frameStartMs = millis();
+  frameStartUs = micros();
   chaseLastStepMs = millis();
 }
 
@@ -391,20 +444,45 @@ void updateLeds() {
       break;
   }
 
-  // ---- 硬件 30% 占空分时窗口: 10ms 一帧, 每颗灯专属 3ms 导通窗口, 帧尾 1ms 全灭间隔 ----
-  uint32_t framePos = (now - frameStartMs) % FRAME_MS; // 0..9
+  // ---- 硬件 30% 占空分时窗口(微秒级): 10ms 一帧, 每颗灯专属 3ms 导通窗口, 帧尾 1ms 全灭间隔 ----
+  uint32_t nowUs = micros();
+  uint32_t framePosUs = (nowUs - frameStartUs) % FRAME_US; // 0..9999
   int8_t slotIndex = -1; // -1 表示处于帧尾间隔, 任何灯都不允许导通
-  if (framePos < SLOT_ON_MS) {
+  uint32_t slotPosUs = 0; // 当前灯在自己窗口内已经过去的时间
+  if (framePosUs < SLOT_ON_US) {
     slotIndex = 0;
-  } else if (framePos < 2 * SLOT_ON_MS) {
+    slotPosUs = framePosUs;
+  } else if (framePosUs < 2 * SLOT_ON_US) {
     slotIndex = 1;
-  } else if (framePos < 3 * SLOT_ON_MS) {
+    slotPosUs = framePosUs - SLOT_ON_US;
+  } else if (framePosUs < 3 * SLOT_ON_US) {
     slotIndex = 2;
+    slotPosUs = framePosUs - 2 * SLOT_ON_US;
   }
 
   for (uint8_t i = 0; i < 3; i++) {
-    bool on = (slotIndex == (int8_t)i) && wantOn[i];
+    bool inOwnSlot = (slotIndex == (int8_t)i) && wantOn[i];
+    // 按校准百分比缩短窗口内真正导通的时长(窗口边界本身不变, 保证互不重叠)
+    uint32_t onUs = (uint32_t)SLOT_ON_US * ledDutyPercent[i] / LED_DUTY_MAX_PERCENT;
+    bool on = inOwnSlot && (slotPosUs < onUs);
     digitalWrite(LED_PINS[i], on ? HIGH : LOW);
+  }
+}
+
+// 广播看门狗: 定期兜底检查, 只要连接数还没到上限但当前又没在广播(例如某次异常
+// 导致广播意外停掉, 而 onConnect/onDisconnect 都没能触发重新广播), 就主动补一次,
+// 避免出现"怎么都搜不到设备"的死锁状态。
+uint32_t lastAdvCheckMs = 0;
+const uint32_t ADV_CHECK_INTERVAL_MS = 2000;
+
+void ensureAdvertising() {
+  uint32_t now = millis();
+  if (now - lastAdvCheckMs < ADV_CHECK_INTERVAL_MS) return;
+  lastAdvCheckMs = now;
+  if (!pServer) return;
+  if (pServer->getConnectedCount() < MAX_DESIRED_CONNECTIONS && !NimBLEDevice::getAdvertising()->isAdvertising()) {
+    Serial.println("[BLE] watchdog: not advertising but slots available, restarting advertising");
+    NimBLEDevice::startAdvertising();
   }
 }
 
@@ -412,4 +490,5 @@ void loop() {
   scanButtons();
   updateLeds();
   handleUnbondCombo();
+  ensureAdvertising();
 }

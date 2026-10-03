@@ -111,10 +111,15 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     static let deviceNamePrefix = "HanHan 5K3L"
     static let ledServiceUUID = CBUUID(string: "6E400100-B5A3-F393-E0A9-E50E24DCCA9E")
     static let ledCharUUID = CBUUID(string: "6E400101-B5A3-F393-E0A9-E50E24DCCA9E")
+    static let ledCalibCharUUID = CBUUID(string: "6E400102-B5A3-F393-E0A9-E50E24DCCA9E")
+    static let maxDutyPercent: UInt8 = 30
+    static let calibDefaultsKey = "ledDutyPercent" // [Int] 长度 3, 0~30
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var ledChar: CBCharacteristic?
+    private var ledCalibChar: CBCharacteristic?
+    private var scanTimeoutWorkItem: DispatchWorkItem?
 
     // 连上设备前如果调用了 send(), 先记下来, 连接建立后自动补发
     private var pendingPayload: (mask: UInt8, mode: UInt8)?
@@ -122,6 +127,14 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     var onStatusChanged: (() -> Void)?
 
     private(set) var statusText: String = "未初始化"
+
+    // 每颗 LED 的亮度校准百分比(0~30), 持久化在 UserDefaults, 每次重连会自动下发给固件
+    private(set) var dutyPercent: [UInt8] = {
+        if let saved = UserDefaults.standard.array(forKey: HanHanBLEManager.calibDefaultsKey) as? [Int], saved.count == 3 {
+            return saved.map { UInt8(max(0, min(Int(HanHanBLEManager.maxDutyPercent), $0))) }
+        }
+        return [HanHanBLEManager.maxDutyPercent, HanHanBLEManager.maxDutyPercent, HanHanBLEManager.maxDutyPercent]
+    }()
 
     override init() {
         super.init()
@@ -147,6 +160,18 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         }
         setStatus("搜索中...")
         central.scanForPeripherals(withServices: nil, options: nil)
+
+        // 搜索超时保护: 避免因为设备不在范围内/未上电等原因导致永远卡在"搜索中"
+        scanTimeoutWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if self.peripheral?.state != .connected {
+                self.central.stopScan()
+                self.setStatus("未找到设备, 请确认 HanHan 5K3L 已通电且在蓝牙范围内, 然后点击「重新搜索设备」")
+            }
+        }
+        scanTimeoutWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
     }
 
     func send(mask: UInt8, mode: UInt8) {
@@ -160,6 +185,22 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         let writeType: CBCharacteristicWriteType = chr.properties.contains(.write) ? .withResponse : .withoutResponse
         p.writeValue(data, for: chr, type: writeType)
         setStatus("已发送 mask=0b\(String(mask, radix: 2)) mode=\(mode)")
+    }
+
+    // 设置单颗 LED 的亮度校准百分比(0~30), 立即持久化并在已连接时下发给固件
+    func setDutyPercent(index: Int, percent: Int) {
+        guard index >= 0 && index < 3 else { return }
+        let clamped = UInt8(max(0, min(Int(Self.maxDutyPercent), percent)))
+        dutyPercent[index] = clamped
+        UserDefaults.standard.set(dutyPercent.map { Int($0) }, forKey: Self.calibDefaultsKey)
+        sendCalibration()
+    }
+
+    func sendCalibration() {
+        guard let p = peripheral, p.state == .connected, let chr = ledCalibChar else { return }
+        let data = Data(dutyPercent)
+        let writeType: CBCharacteristicWriteType = chr.properties.contains(.write) ? .withResponse : .withoutResponse
+        p.writeValue(data, for: chr, type: writeType)
     }
 
     // MARK: CBCentralManagerDelegate
@@ -182,6 +223,7 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         let name = peripheral.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
         guard let n = name, n.hasPrefix(Self.deviceNamePrefix) else { return }
         central.stopScan()
+        scanTimeoutWorkItem?.cancel()
         self.peripheral = peripheral
         peripheral.delegate = self
         setStatus("找到 \(n), 连接中...")
@@ -199,6 +241,7 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         ledChar = nil
+        ledCalibChar = nil
         setStatus("已断开")
     }
 
@@ -207,15 +250,23 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard let services = peripheral.services else { return }
         for service in services where service.uuid == Self.ledServiceUUID {
-            peripheral.discoverCharacteristics([Self.ledCharUUID], for: service)
+            peripheral.discoverCharacteristics([Self.ledCharUUID, Self.ledCalibCharUUID], for: service)
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let chars = service.characteristics else { return }
-        for c in chars where c.uuid == Self.ledCharUUID {
-            ledChar = c
+        for c in chars {
+            if c.uuid == Self.ledCharUUID {
+                ledChar = c
+            } else if c.uuid == Self.ledCalibCharUUID {
+                ledCalibChar = c
+            }
+        }
+        if ledChar != nil {
             setStatus("就绪: \(peripheral.name ?? "?")")
+            // 连接建立后把本地保存的亮度校准值重新下发一遍, 固件重启后会丢失这个状态
+            sendCalibration()
             if let pending = pendingPayload {
                 pendingPayload = nil
                 send(mask: pending.mask, mode: pending.mode)
@@ -397,6 +448,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.representedObject = preset
             ledSubmenu.addItem(item)
         }
+
+        ledSubmenu.addItem(NSMenuItem.separator())
+        let calibItem = NSMenuItem(title: "亮度校准", action: nil, keyEquivalent: "")
+        let calibSubmenu = NSMenu()
+        let calibHint = NSMenuItem(title: "各灯 Vf 不同, 同占空比亮度不一致, 可在此单独调低偏亮的灯", action: nil, keyEquivalent: "")
+        calibHint.isEnabled = false
+        calibSubmenu.addItem(calibHint)
+        calibSubmenu.addItem(NSMenuItem.separator())
+        for i in 0..<3 {
+            let pct = Int(bleManager.dutyPercent[i])
+            let label = NSMenuItem(title: "LED\(i): \(pct)% (上限 30%)", action: nil, keyEquivalent: "")
+            label.isEnabled = false
+            calibSubmenu.addItem(label)
+
+            let plus = NSMenuItem(title: "  LED\(i) +5%", action: #selector(ledCalibAdjust(_:)), keyEquivalent: "")
+            plus.target = self
+            plus.representedObject = [i, 5]
+            calibSubmenu.addItem(plus)
+
+            let minus = NSMenuItem(title: "  LED\(i) -5%", action: #selector(ledCalibAdjust(_:)), keyEquivalent: "")
+            minus.target = self
+            minus.representedObject = [i, -5]
+            calibSubmenu.addItem(minus)
+
+            let reset = NSMenuItem(title: "  LED\(i) 重置为 30%", action: #selector(ledCalibReset(_:)), keyEquivalent: "")
+            reset.target = self
+            reset.representedObject = i
+            calibSubmenu.addItem(reset)
+
+            if i < 2 { calibSubmenu.addItem(NSMenuItem.separator()) }
+        }
+        calibItem.submenu = calibSubmenu
+        ledSubmenu.addItem(calibItem)
+
         ledItem.submenu = ledSubmenu
         menu.addItem(ledItem)
 
@@ -436,6 +521,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let preset = sender.representedObject as? LedPreset else { return }
         let (mask, mode) = preset.payload
         bleManager.send(mask: mask, mode: mode)
+    }
+
+    @objc func ledCalibAdjust(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [Int], info.count == 2 else { return }
+        let index = info[0]
+        let delta = info[1]
+        let current = Int(bleManager.dutyPercent[index])
+        bleManager.setDutyPercent(index: index, percent: current + delta)
+        rebuildMenu()
+    }
+
+    @objc func ledCalibReset(_ sender: NSMenuItem) {
+        guard let index = sender.representedObject as? Int else { return }
+        bleManager.setDutyPercent(index: index, percent: 30)
+        rebuildMenu()
     }
 
     @objc func openSettings() {
