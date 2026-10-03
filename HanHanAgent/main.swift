@@ -119,8 +119,8 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     static let ledServiceUUID = CBUUID(string: "6E400100-B5A3-F393-E0A9-E50E24DCCA9E")
     static let ledCharUUID = CBUUID(string: "6E400101-B5A3-F393-E0A9-E50E24DCCA9E")
     static let ledCalibCharUUID = CBUUID(string: "6E400102-B5A3-F393-E0A9-E50E24DCCA9E")
-    static let maxDutyPercent: UInt8 = 30
-    static let calibDefaultsKey = "ledDutyPercent" // [Int] 长度 3, 0~30
+    static let allocSumMax = 100 // 三颗灯分配百分比总和上限, 对应固件 LED_ALLOC_SUM_MAX
+    static let allocDefaultsKey = "ledAllocPercent" // [Int] 长度 3, 总和 <=100
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -135,13 +135,30 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
     private(set) var statusText: String = "未初始化"
 
-    // 每颗 LED 的亮度校准百分比(0~30), 持久化在 UserDefaults, 每次重连会自动下发给固件
-    private(set) var dutyPercent: [UInt8] = {
-        if let saved = UserDefaults.standard.array(forKey: HanHanBLEManager.calibDefaultsKey) as? [Int], saved.count == 3 {
-            return saved.map { UInt8(max(0, min(Int(HanHanBLEManager.maxDutyPercent), $0))) }
+    // 每颗 LED 分配到的帧内占比(0~100, 三者总和 <=100), 持久化在 UserDefaults,
+    // 每次重连会自动下发给固件。默认各 30(总和 90, 和之前版本的默认值一致)。
+    private(set) var allocPercent: [UInt8] = {
+        if let saved = UserDefaults.standard.array(forKey: HanHanBLEManager.allocDefaultsKey) as? [Int], saved.count == 3 {
+            var vals = saved.map { UInt8(max(0, min(HanHanBLEManager.allocSumMax, $0))) }
+            HanHanBLEManager.clampAllocation(&vals)
+            return vals
         }
-        return [HanHanBLEManager.maxDutyPercent, HanHanBLEManager.maxDutyPercent, HanHanBLEManager.maxDutyPercent]
+        return [30, 30, 30]
     }()
+
+    // 和固件 clampLedAllocation() 逻辑一致: 单值先夹到 0~100, 总和超了就按比例整体缩小
+    static func clampAllocation(_ vals: inout [UInt8]) {
+        var sum = 0
+        for i in 0..<vals.count {
+            if Int(vals[i]) > allocSumMax { vals[i] = UInt8(allocSumMax) }
+            sum += Int(vals[i])
+        }
+        if sum > allocSumMax && sum > 0 {
+            for i in 0..<vals.count {
+                vals[i] = UInt8(Int(vals[i]) * allocSumMax / sum)
+            }
+        }
+    }
 
     override init() {
         super.init()
@@ -207,18 +224,20 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         setStatus("已发送 mask=0b\(String(mask, radix: 2)) mode=\(mode)")
     }
 
-    // 设置单颗 LED 的亮度校准百分比(0~30), 立即持久化并在已连接时下发给固件
-    func setDutyPercent(index: Int, percent: Int) {
-        guard index >= 0 && index < 3 else { return }
-        let clamped = UInt8(max(0, min(Int(Self.maxDutyPercent), percent)))
-        dutyPercent[index] = clamped
-        UserDefaults.standard.set(dutyPercent.map { Int($0) }, forKey: Self.calibDefaultsKey)
+    // 一次性设置三颗 LED 的分配百分比(每个 0~100, 总和会被自动夹到 <=100),
+    // 立即持久化并在已连接时下发给固件。供亮度/分配滑块界面调用。
+    func setAllocation(_ values: [UInt8]) {
+        guard values.count == 3 else { return }
+        var vals = values
+        Self.clampAllocation(&vals)
+        allocPercent = vals
+        UserDefaults.standard.set(allocPercent.map { Int($0) }, forKey: Self.allocDefaultsKey)
         sendCalibration()
     }
 
     func sendCalibration() {
         guard let p = peripheral, p.state == .connected, let chr = ledCalibChar else { return }
-        let data = Data(dutyPercent)
+        let data = Data(allocPercent)
         let writeType: CBCharacteristicWriteType = chr.properties.contains(.write) ? .withResponse : .withoutResponse
         p.writeValue(data, for: chr, type: writeType)
     }
@@ -300,6 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var eventTap: CFMachPort?
     var runLoopSource: CFRunLoopSource?
     var settingsWindowController: SettingsWindowController?
+    var ledControlWindowController: LedControlWindowController?
     let bleManager = HanHanBLEManager()
 
     // 当前目标: 具体某一个正在运行的 App 实例(按 pid 精确定位, 不是笼统的 bundle id)
@@ -338,7 +358,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ensureAccessibilityPermission()
         setupEventTap()
 
-        bleManager.onStatusChanged = { [weak self] in self?.rebuildMenu() }
+        bleManager.onStatusChanged = { [weak self] in
+            self?.rebuildMenu()
+            self?.ledControlWindowController?.refreshStatus()
+        }
         bleManager.startScan()
 
         // App 列表可能随时启动/退出, 定期刷新菜单
@@ -494,57 +517,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // ---- LED 控制(直接用 CoreBluetooth 连固件的自定义 LED 特征值, 和 HID 键盘连接是两回事) ----
-        let ledItem = NSMenuItem(title: "LED 控制", action: nil, keyEquivalent: "")
-        let ledSubmenu = NSMenu()
-
-        let ledStatusLine = NSMenuItem(title: "状态: \(bleManager.statusText)", action: nil, keyEquivalent: "")
-        ledStatusLine.isEnabled = false
-        ledSubmenu.addItem(ledStatusLine)
-        ledSubmenu.addItem(NSMenuItem(title: "重新搜索设备", action: #selector(ledRescan), keyEquivalent: ""))
-        ledSubmenu.addItem(NSMenuItem.separator())
-        for preset in LedPreset.allCases {
-            let item = NSMenuItem(title: preset.rawValue, action: #selector(ledApplyPreset(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = preset
-            ledSubmenu.addItem(item)
-        }
-
-        ledSubmenu.addItem(NSMenuItem.separator())
-        let calibItem = NSMenuItem(title: "亮度校准", action: nil, keyEquivalent: "")
-        let calibSubmenu = NSMenu()
-        let calibHint = NSMenuItem(title: "各灯 Vf 不同, 同占空比亮度不一致, 可在此单独调低偏亮的灯", action: nil, keyEquivalent: "")
-        calibHint.isEnabled = false
-        calibSubmenu.addItem(calibHint)
-        calibSubmenu.addItem(NSMenuItem.separator())
-        for i in 0..<3 {
-            let pct = Int(bleManager.dutyPercent[i])
-            let label = NSMenuItem(title: "LED\(i): \(pct)% (上限 30%)", action: nil, keyEquivalent: "")
-            label.isEnabled = false
-            calibSubmenu.addItem(label)
-
-            let plus = NSMenuItem(title: "  LED\(i) +5%", action: #selector(ledCalibAdjust(_:)), keyEquivalent: "")
-            plus.target = self
-            plus.representedObject = [i, 5]
-            calibSubmenu.addItem(plus)
-
-            let minus = NSMenuItem(title: "  LED\(i) -5%", action: #selector(ledCalibAdjust(_:)), keyEquivalent: "")
-            minus.target = self
-            minus.representedObject = [i, -5]
-            calibSubmenu.addItem(minus)
-
-            let reset = NSMenuItem(title: "  LED\(i) 重置为 30%", action: #selector(ledCalibReset(_:)), keyEquivalent: "")
-            reset.target = self
-            reset.representedObject = i
-            calibSubmenu.addItem(reset)
-
-            if i < 2 { calibSubmenu.addItem(NSMenuItem.separator()) }
-        }
-        calibItem.submenu = calibSubmenu
-        ledSubmenu.addItem(calibItem)
-
-        ledItem.submenu = ledSubmenu
-        menu.addItem(ledItem)
+        // ---- LED 控制(效果预设 + 亮度/分配滑块合并成一个独立窗口) ----
+        menu.addItem(NSMenuItem(title: "LED 控制...", action: #selector(openLedControl), keyEquivalent: ""))
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "按键动作设置...", action: #selector(openSettings), keyEquivalent: ""))
@@ -580,29 +554,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func ledRescan() {
-        bleManager.startScan()
-    }
-
-    @objc func ledApplyPreset(_ sender: NSMenuItem) {
-        guard let preset = sender.representedObject as? LedPreset else { return }
-        let (mask, mode) = preset.payload
-        bleManager.send(mask: mask, mode: mode)
-    }
-
-    @objc func ledCalibAdjust(_ sender: NSMenuItem) {
-        guard let info = sender.representedObject as? [Int], info.count == 2 else { return }
-        let index = info[0]
-        let delta = info[1]
-        let current = Int(bleManager.dutyPercent[index])
-        bleManager.setDutyPercent(index: index, percent: current + delta)
-        rebuildMenu()
-    }
-
-    @objc func ledCalibReset(_ sender: NSMenuItem) {
-        guard let index = sender.representedObject as? Int else { return }
-        bleManager.setDutyPercent(index: index, percent: 30)
-        rebuildMenu()
+    @objc func openLedControl() {
+        if ledControlWindowController == nil {
+            ledControlWindowController = LedControlWindowController(bleManager: bleManager)
+        }
+        ledControlWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func openSettings() {
@@ -719,6 +676,181 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // MARK: - 按键动作设置窗口
+
+// MARK: - LED 控制窗口(效果预设 + 亮度/分配滑块)
+
+final class LedControlWindowController: NSWindowController {
+    let bleManager: HanHanBLEManager
+    var statusLabel: NSTextField!
+    var totalLabel: NSTextField!
+    var sliders: [NSSlider] = []
+    var valueLabels: [NSTextField] = []
+    let ledNames = ["LED0 (黄)", "LED1 (红)", "LED2 (绿)"]
+
+    init(bleManager: HanHanBLEManager) {
+        self.bleManager = bleManager
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "HanHan Agent · LED 控制"
+        window.center()
+        super.init(window: window)
+        buildContent()
+        refreshStatus()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func buildContent() {
+        guard let window = window else { return }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        statusLabel = NSTextField(labelWithString: "状态: -")
+        statusLabel.font = NSFont.systemFont(ofSize: 12)
+        stack.addArrangedSubview(statusLabel)
+
+        let rescanButton = NSButton(title: "重新搜索设备", target: self, action: #selector(rescan))
+        rescanButton.bezelStyle = .rounded
+        stack.addArrangedSubview(rescanButton)
+
+        stack.addArrangedSubview(separatorView())
+
+        let presetHint = NSTextField(labelWithString: "效果预设:")
+        presetHint.font = NSFont.boldSystemFont(ofSize: 12)
+        stack.addArrangedSubview(presetHint)
+
+        let presetGrid = NSStackView()
+        presetGrid.orientation = .vertical
+        presetGrid.alignment = .leading
+        presetGrid.spacing = 6
+        var row: NSStackView? = nil
+        for (i, preset) in LedPreset.allCases.enumerated() {
+            if i % 2 == 0 {
+                row = NSStackView()
+                row?.orientation = .horizontal
+                row?.spacing = 8
+                presetGrid.addArrangedSubview(row!)
+            }
+            let button = NSButton(title: preset.rawValue, target: self, action: #selector(applyPreset(_:)))
+            button.bezelStyle = .rounded
+            button.tag = i
+            row?.addArrangedSubview(button)
+        }
+        stack.addArrangedSubview(presetGrid)
+
+        stack.addArrangedSubview(separatorView())
+
+        let calibHint = NSTextField(labelWithString: "亮度/分配(三者总和 <=100, 拖动调整, 各灯 Vf 不同可借此调平):")
+        calibHint.font = NSFont.boldSystemFont(ofSize: 12)
+        calibHint.preferredMaxLayoutWidth = 360
+        stack.addArrangedSubview(calibHint)
+
+        for i in 0..<3 {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 8
+
+            let nameLabel = NSTextField(labelWithString: ledNames[i])
+            nameLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
+
+            let slider = NSSlider(value: Double(bleManager.allocPercent[i]), minValue: 0, maxValue: 100,
+                                   target: self, action: #selector(sliderChanged(_:)))
+            slider.tag = i
+            slider.isContinuous = true
+            slider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+            sliders.append(slider)
+
+            let valueLabel = NSTextField(labelWithString: "\(bleManager.allocPercent[i])%")
+            valueLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
+            valueLabels.append(valueLabel)
+
+            row.addArrangedSubview(nameLabel)
+            row.addArrangedSubview(slider)
+            row.addArrangedSubview(valueLabel)
+            stack.addArrangedSubview(row)
+        }
+
+        totalLabel = NSTextField(labelWithString: "")
+        totalLabel.font = NSFont.systemFont(ofSize: 12)
+        stack.addArrangedSubview(totalLabel)
+        updateTotalLabel()
+
+        let doneButton = NSButton(title: "完成", target: self, action: #selector(closeWindow))
+        doneButton.bezelStyle = .rounded
+        stack.addArrangedSubview(doneButton)
+
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView = container
+        container.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -20),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20),
+        ])
+    }
+
+    func separatorView() -> NSView {
+        let line = NSBox()
+        line.boxType = .separator
+        line.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        return line
+    }
+
+    func updateTotalLabel() {
+        let sum = bleManager.allocPercent.reduce(0) { $0 + Int($1) }
+        totalLabel.stringValue = "总计: \(sum) / 100"
+        totalLabel.textColor = sum > 100 ? .systemRed : .secondaryLabelColor
+    }
+
+    func refreshStatus() {
+        statusLabel?.stringValue = "状态: \(bleManager.statusText)"
+    }
+
+    @objc func rescan() {
+        bleManager.startScan()
+    }
+
+    @objc func applyPreset(_ sender: NSButton) {
+        guard sender.tag >= 0 && sender.tag < LedPreset.allCases.count else { return }
+        let preset = LedPreset.allCases[sender.tag]
+        let (mask, mode) = preset.payload
+        bleManager.send(mask: mask, mode: mode)
+    }
+
+    // 拖动某一个滑块时, 如果会导致总和超过 100, 就把这个滑块本身夹到"剩余预算"以内
+    // (不偷偷改动另外两个, 用户体感更直观: 想要更亮就得先把别的调低腾出空间)
+    @objc func sliderChanged(_ sender: NSSlider) {
+        let index = sender.tag
+        var vals = sliders.map { UInt8($0.doubleValue.rounded()) }
+        let others = (0..<3).filter { $0 != index }.reduce(0) { $0 + Int(vals[$1]) }
+        let budget = max(0, 100 - others)
+        if Int(vals[index]) > budget {
+            vals[index] = UInt8(budget)
+            sender.doubleValue = Double(budget)
+        }
+        for i in 0..<3 {
+            valueLabels[i].stringValue = "\(vals[i])%"
+        }
+        updateTotalLabel()
+        bleManager.setAllocation(vals)
+    }
+
+    @objc func closeWindow() {
+        window?.close()
+    }
+}
 
 final class SettingsWindowController: NSWindowController {
     weak var appDelegate: AppDelegate?

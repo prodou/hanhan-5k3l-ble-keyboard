@@ -22,7 +22,7 @@ HanHan 5K3L LED 效果测试脚本
     python3 led_test.py static 0b101        # LED0 和 LED2 亮
     python3 led_test.py blink 0b011         # LED0/LED1 一起慢闪
     python3 led_test.py chase                # 流水灯, mask 参数会被忽略
-    python3 led_test.py calib 30 20 30       # 设置 LED0/1/2 亮度校准百分比(0~30)
+    python3 led_test.py calib 30 20 30       # 设置 LED0/1/2 分配百分比(每个0~100, 三者总和<=100)
 
 本机(这台开发机)运行此脚本可能会因为没有 GUI/WindowServer 会话导致
 CoreBluetooth 权限请求不出来("BLE is not authorized")。如果遇到这种情况,
@@ -37,7 +37,7 @@ from bleak import BleakClient, BleakScanner
 DEVICE_NAME = "HanHan 5K3L v0.1"
 LED_STATUS_CHAR_UUID = "6e400101-b5a3-f393-e0a9-e50e24dcca9e"
 LED_CALIB_CHAR_UUID = "6e400102-b5a3-f393-e0a9-e50e24dcca9e"
-MAX_DUTY_PERCENT = 30
+ALLOC_SUM_MAX = 100  # 三者总和上限, 单个值理论上也不会超过这个
 
 MODE_OFF = 0
 MODE_STATIC = 1
@@ -65,12 +65,15 @@ async def send(mask: int, mode: int):
 
 
 async def send_calib(percents):
-    clamped = [max(0, min(MAX_DUTY_PERCENT, p)) for p in percents]
+    vals = [max(0, min(ALLOC_SUM_MAX, p)) for p in percents]
+    total = sum(vals)
+    if total > ALLOC_SUM_MAX and total > 0:
+        vals = [v * ALLOC_SUM_MAX // total for v in vals]
     device = await find_device()
     async with BleakClient(device) as client:
-        payload = bytes(clamped)
+        payload = bytes(vals)
         await client.write_gatt_char(LED_CALIB_CHAR_UUID, payload, response=True)
-        print(f"[write] 亮度校准 LED0/1/2 = {clamped} -> 已发送")
+        print(f"[write] 分配比例 LED0/1/2 = {vals} (总和 {sum(vals)}) -> 已发送")
         await asyncio.sleep(1.0)
 
 
@@ -98,7 +101,7 @@ def main():
         asyncio.run(send(0b111, MODE_CHASE))
     elif cmd == "calib":
         if len(sys.argv) < 5:
-            print("用法: python3 led_test.py calib <led0> <led1> <led2>  (每个 0~30)")
+            print("用法: python3 led_test.py calib <led0> <led1> <led2>  (每个 0~100, 总和<=100)")
             sys.exit(1)
         percents = [int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])]
         asyncio.run(send_calib(percents))

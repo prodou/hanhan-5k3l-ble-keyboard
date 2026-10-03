@@ -26,21 +26,24 @@
            2 = 闪烁  (mask 选中的灯整体慢闪: 亮400ms / 灭400ms)
            3 = 流水灯(忽略 mask, LED0->LED1->LED2->LED0 顺序点亮, 每步150ms)
          只发 1 个字节时视为旧协议, 自动当作 byte1=1(常亮) 处理, 保持向后兼容。
-       另有一个**亮度校准特征值**(同 Service 下), 写 3 个字节:
-         byte0/1/2 = LED0/1/2 的占空比百分比(0~30, 超过 30 会被固件夹到 30),
-         用于抵消不同颜色 LED 正向压降不同导致的肉眼亮度不一致, 默认全部 30。
-    3. **无论处于哪种效果模式, 任何一颗 LED 在任意时刻的占空比都不超过 30%**:
+       另有一个**亮度/带宽分配特征值**(同 Service 下), 写 3 个字节:
+         byte0/1/2 = LED0/1/2 分配到的"帧内占比"百分比(0~100),
+         **三者总和不能超过 100**(固件会按比例整体缩小超出的部分), 默认各 30。
+         可以用来抵消不同颜色 LED 正向压降不同导致的肉眼亮度不一致,
+         也可以在总预算内自由分配(比如某颗想格外亮一些就多分配给它)。
+    3. **任意时刻三颗 LED 最多只有一颗导通, 不会在共用限流电阻上叠加电流**:
        硬件上 3 颗 LED 共用同一限流电阻到 GND, 为避免叠加电流,
-       采用 10ms 为一帧、每颗 LED 专属 3ms 导通窗口(10ms 内最多占 30%)的分时复用,
-       窗口内实际导通时长再按各自的"亮度校准百分比"进一步缩短(微秒级精度):
-         时隙0 (0~3ms)   : 只有 LED0 允许导通, 导通时长 = 3ms * 校准值/30
-         时隙1 (3~6ms)   : 只有 LED1 允许导通, 导通时长 = 3ms * 校准值/30
-         时隙2 (6~9ms)   : 只有 LED2 允许导通, 导通时长 = 3ms * 校准值/30
-         (9~10ms)        : 全灭(帧间隔)
+       采用 10ms 为一帧的分时复用, 三颗灯各自分到一段首尾相接、互不重叠的
+       专属导通窗口, 窗口宽度 = 10ms * 分配百分比/100(微秒级精度):
+         LED0 窗口: [0, w0)
+         LED1 窗口: [w0, w0+w1)
+         LED2 窗口: [w0+w1, w0+w1+w2)
+         (剩余部分, 如果 w0+w1+w2 < 10ms) : 全灭(帧尾间隔)
        "常亮"/"闪烁"/"流水灯"等上层效果只决定某颗 LED 在当前宏观时刻
        是否参与这个分时复用(即是否允许在轮到它的窗口导通),
-       从不会让任何一颗 LED 跳过分时直接常通, 从根本上保证 <=30% 占空,
-       任意时刻最多同时一颗导通。
+       从不会让任何一颗 LED 跳过分时直接常通, 从根本上保证任意时刻
+       最多同时一颗导通, 电气上绝对安全; 分配比例只影响"相对亮度",
+       不影响"互斥性"这个安全保证。
     4. 支持**同时**连接手机/电脑(HID 键盘)和 HanHan Agent(LED 控制)两条独立
        BLE 连接: 每次有新连接建立后, 只要当前连接数还没到上限(2), 就会自动
        重新开启广播以便接纳另一条连接; loop() 里也有兜底逻辑, 只要连接数未满
@@ -116,13 +119,30 @@ enum LedMode : uint8_t {
   LED_MODE_CHASE = 3,
 };
 
-const uint8_t LED_DUTY_MAX_PERCENT = 30; // 硬性上限, 任何校准值都不能超过这个
+const uint8_t LED_ALLOC_SUM_MAX = 100; // 三颗灯的分配百分比总和上限(时分复用天然保证任意时刻只有一颗导通,
+                                        // 所以只要总和不超过一帧, 怎么分配都不会叠加电流)
 
 volatile bool ledEnabled[3] = {false, false, false}; // mask: 常亮/闪烁模式下哪些灯参与显示
 volatile uint8_t ledMode = LED_MODE_STATIC;
-// 每颗 LED 的占空比校准值(0~30), 用于抵消不同颜色 LED 正向压降不同导致的肉眼亮度差异,
-// 默认都给满上限 30, 后续由 HanHan Agent 下发校准后调低偏亮的那几颗。
-volatile uint8_t ledDutyPercent[3] = {LED_DUTY_MAX_PERCENT, LED_DUTY_MAX_PERCENT, LED_DUTY_MAX_PERCENT};
+// 每颗 LED 分配到的帧内占比(0~100), 三者总和不能超过 100, 用于:
+//   1) 抵消不同颜色 LED 正向压降不同导致的肉眼亮度差异
+//   2) 让用户在总预算内自由分配亮度(比如想要某颗更亮, 可以多分配一些给它)
+// 默认三等分(各 30, 总和 90, 留一点余量), 由 HanHan Agent 下发调整。
+volatile uint8_t ledAllocPercent[3] = {30, 30, 30};
+
+// 把三个百分比值按总和 <=100 的约束夹一遍: 单值先夹到 0~100, 总和超了就按比例整体缩小。
+void clampLedAllocation(uint8_t vals[3]) {
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (vals[i] > LED_ALLOC_SUM_MAX) vals[i] = LED_ALLOC_SUM_MAX;
+    sum += vals[i];
+  }
+  if (sum > LED_ALLOC_SUM_MAX && sum > 0) {
+    for (uint8_t i = 0; i < 3; i++) {
+      vals[i] = (uint8_t)((uint32_t)vals[i] * LED_ALLOC_SUM_MAX / sum);
+    }
+  }
+}
 
 class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
@@ -143,13 +163,14 @@ class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
 class LedCalibCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
     std::string v = pChr->getValue();
-    for (size_t i = 0; i < 3 && i < v.length(); i++) {
-      uint8_t pct = (uint8_t)v[i];
-      if (pct > LED_DUTY_MAX_PERCENT) pct = LED_DUTY_MAX_PERCENT;
-      ledDutyPercent[i] = pct;
-    }
-    Serial.printf("[LED] calibration duty%% = %u, %u, %u\n",
-                  ledDutyPercent[0], ledDutyPercent[1], ledDutyPercent[2]);
+    if (v.length() < 3) return;
+    uint8_t vals[3] = {(uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2]};
+    clampLedAllocation(vals);
+    ledAllocPercent[0] = vals[0];
+    ledAllocPercent[1] = vals[1];
+    ledAllocPercent[2] = vals[2];
+    Serial.printf("[LED] allocation%% = %u, %u, %u\n",
+                  ledAllocPercent[0], ledAllocPercent[1], ledAllocPercent[2]);
   }
 };
 
@@ -274,16 +295,16 @@ void removeKey(uint8_t keycode) {
 // ------------------- LED 配置 -------------------
 const uint8_t LED_PINS[3] = {2, 6, 7};
 
-// 硬件分时复用: 每帧 10ms, 每颗 LED 专属 3ms 导通窗口 -> 占空比上限固定 30%,
-// 帧内剩余 1ms 全灭作为间隔, 任意时刻最多一颗 LED 导通。
-// 窗口内真正导通的时长再按各自的 ledDutyPercent[]/30 比例进一步缩短(微秒级精度),
-// 用来校准不同颜色 LED 因正向压降不同造成的肉眼亮度差异, 同时保证实际占空比
-// 永远 <= 这个 30% 的硬性上限。
+// 硬件分时复用: 每帧 10ms(= FRAME_US), 三颗 LED 各自分到一段专属导通窗口,
+// 窗口宽度 = FRAME_US * ledAllocPercent[i] / 100, 三个窗口首尾相接、互不重叠,
+// 任意时刻最多只有一颗 LED 导通(电气上安全, 不会在共用限流电阻上叠加电流)。
+// 三个窗口宽度总和 <=100% 一帧, 多出来的部分(100-总和)留作帧尾全灭间隔。
+// ledAllocPercent[] 由 HanHan Agent 的亮度校准界面(三个滑块, 总和 100 以内自由分配)下发,
+// 既用来抵消不同颜色 LED 正向压降不同导致的肉眼亮度差异, 也允许用户按喜好分配亮度预算。
 const uint32_t FRAME_US = 10000;
-const uint32_t SLOT_ON_US = 3000;   // 30% of FRAME_US
 uint32_t frameStartUs = 0;
 
-// 闪烁效果: 慢速整体亮/灭切换(这里的"亮"仍然要经过上面的 30% 分时窗口, 不是常通)
+// 闪烁效果: 慢速整体亮/灭切换(这里的"亮"仍然要经过上面的分时窗口, 不是常通)
 const uint32_t BLINK_PERIOD_MS = 800; // 亮400ms / 灭400ms
 
 // 流水灯效果: 依次点亮 LED0 -> LED1 -> LED2 -> LED0 ...
@@ -328,7 +349,7 @@ void setupBle() {
   );
   pLedCalibChr->setCallbacks(new LedCalibCallbacks());
   {
-    uint8_t initVal[3] = {ledDutyPercent[0], ledDutyPercent[1], ledDutyPercent[2]};
+    uint8_t initVal[3] = {ledAllocPercent[0], ledAllocPercent[1], ledAllocPercent[2]};
     pLedCalibChr->setValue(initVal, 3);
   }
   pLedService->start();
@@ -424,9 +445,9 @@ void updateLeds() {
   // ---- 闪烁宏观相位(慢速整体 亮/灭 切换) ----
   bool blinkPhaseOn = (now % BLINK_PERIOD_MS) < (BLINK_PERIOD_MS / 2);
 
-  // ---- 根据当前效果模式, 决定每颗 LED 此刻"是否允许参与下面的 30% 占空分时窗口" ----
+  // ---- 根据当前效果模式, 决定每颗 LED 此刻"是否允许参与下面的分时复用窗口" ----
   // 注意: 这里只决定"允许/不允许", 从不跳过分时窗口直接常通,
-  // 所以无论哪种模式, 单颗 LED 的占空比恒定 <=30%。
+  // 所以无论哪种模式, 三颗 LED 任意时刻最多只有一颗导通, 互不叠加电流。
   bool wantOn[3] = {false, false, false};
   switch (ledMode) {
     case LED_MODE_OFF:
@@ -444,28 +465,21 @@ void updateLeds() {
       break;
   }
 
-  // ---- 硬件 30% 占空分时窗口(微秒级): 10ms 一帧, 每颗灯专属 3ms 导通窗口, 帧尾 1ms 全灭间隔 ----
+  // ---- 硬件分时复用窗口(微秒级): 10ms 一帧, 三颗灯按各自 ledAllocPercent[] 分到
+  //      一段首尾相接、互不重叠的专属导通窗口, 剩余部分(如果总和 <100)留作帧尾全灭间隔 ----
   uint32_t nowUs = micros();
   uint32_t framePosUs = (nowUs - frameStartUs) % FRAME_US; // 0..9999
-  int8_t slotIndex = -1; // -1 表示处于帧尾间隔, 任何灯都不允许导通
-  uint32_t slotPosUs = 0; // 当前灯在自己窗口内已经过去的时间
-  if (framePosUs < SLOT_ON_US) {
-    slotIndex = 0;
-    slotPosUs = framePosUs;
-  } else if (framePosUs < 2 * SLOT_ON_US) {
-    slotIndex = 1;
-    slotPosUs = framePosUs - SLOT_ON_US;
-  } else if (framePosUs < 3 * SLOT_ON_US) {
-    slotIndex = 2;
-    slotPosUs = framePosUs - 2 * SLOT_ON_US;
+
+  uint32_t width[3];
+  for (uint8_t i = 0; i < 3; i++) {
+    width[i] = FRAME_US * (uint32_t)ledAllocPercent[i] / 100;
   }
+  uint32_t slotStart[3] = {0, width[0], width[0] + width[1]};
 
   for (uint8_t i = 0; i < 3; i++) {
-    bool inOwnSlot = (slotIndex == (int8_t)i) && wantOn[i];
-    // 按校准百分比缩短窗口内真正导通的时长(窗口边界本身不变, 保证互不重叠)
-    uint32_t onUs = (uint32_t)SLOT_ON_US * ledDutyPercent[i] / LED_DUTY_MAX_PERCENT;
-    bool on = inOwnSlot && (slotPosUs < onUs);
-    digitalWrite(LED_PINS[i], on ? HIGH : LOW);
+    bool inOwnSlot = wantOn[i] && width[i] > 0 &&
+                      framePosUs >= slotStart[i] && framePosUs < slotStart[i] + width[i];
+    digitalWrite(LED_PINS[i], inOwnSlot ? HIGH : LOW);
   }
 }
 
