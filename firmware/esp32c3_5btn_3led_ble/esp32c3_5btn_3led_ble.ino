@@ -7,10 +7,15 @@
     串口调试, 不参与按键/LED 功能。
 
   硬件连接:
-    - 按键(内部上拉,按下=低电平): GPIO0, GPIO1, GPIO3, GPIO4, GPIO10 -> 另一端接 GND
-      (GPIO0 是下载/BOOT 选通脚, 只要不是在"复位瞬间"被按住就不影响正常运行)
+    - 按键(内部上拉,按下=低电平): GPIO0, GPIO1, GPIO3, GPIO5, GPIO10 -> 另一端接 GND
+      (GPIO0 是下载/BOOT 选通脚, 只要不是在"复位瞬间"被按住就不影响正常运行;
+       原方案 F16 按键在 GPIO4, 现挪到 GPIO5, 把 GPIO4 让给电池 ADC 检测,
+       因为 ESP32-C3 的 ADC2/GPIO5 实际不可用, 只有 ADC1/GPIO0~4 能读电压)
     - LED(共用同一限流电阻到 GND, 需分时点亮避免叠加电流):
         LED0 = GPIO2, LED1 = GPIO6, LED2 = GPIO7
+    - 电池电压检测: GPIO4(ADC1) <- 两颗 220k/220k 等值分压电阻的中点,
+      单节锂电池正极(最高 4.2V)经过 1:2 分压后约 0~2.1V 落在 ADC 安全量程内,
+      固件内部再乘 2 还原成实际电池电压
 
   功能:
     1. 按键按下/松开 -> 通过标准 BLE HID 键盘 Input Report 发送 F13~F17,
@@ -49,6 +54,14 @@
        重新开启广播以便接纳另一条连接; loop() 里也有兜底逻辑, 只要连接数未满
        且当前没有在广播, 就会定期自动重新开启广播, 避免因为某次异常导致
        广播停掉后再也连不上。
+    5. 电池电压检测与上报: 每 10 秒读一次 GPIO5 的 ADC 电压(多次采样取平均降噪),
+       乘以分压比(x2)还原成实际电池电压, 再按单节锂电池 4.2V(满)~3.0V(空)
+       的放电曲线换算成百分比, 通过两种方式上报:
+         a) 标准 BLE 电池服务(0x180F, Battery Level 特征值 0x2A19) —— 只报百分比,
+            系统/手机蓝牙设置里会原生显示电池图标, 这是 NimBLEHIDDevice 自带的。
+         b) 自定义电压特征值(同 LED Service 下, UUID 见下方) —— 报 3 字节:
+            byte0/1 = 电压毫伏(uint16, 小端), byte2 = 百分比(0~100),
+            支持 Notify, 供 HanHan Agent 显示具体电压数值。
 
   Arduino IDE 设置:
     开发板:  ESP32C3 Dev Module
@@ -110,6 +123,7 @@ volatile bool bleConnected = false;
 #define LED_SERVICE_UUID "6E400100-B5A3-F393-E0A9-E50E24DCCA9E"
 #define LED_STATUS_CHAR_UUID "6E400101-B5A3-F393-E0A9-E50E24DCCA9E"
 #define LED_CALIB_CHAR_UUID "6E400102-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BATTERY_VOLTAGE_CHAR_UUID "6E400103-B5A3-F393-E0A9-E50E24DCCA9E"
 
 // 效果模式: 0=全灭 1=常亮 2=闪烁 3=流水灯
 enum LedMode : uint8_t {
@@ -176,6 +190,71 @@ class LedCalibCallbacks : public NimBLECharacteristicCallbacks {
 
 NimBLECharacteristic *pLedCalibChr = nullptr;
 
+// ------------------- 电池电压检测 -------------------
+// 单节锂电池(满 4.2V / 建议放电下限 3.0V)经过 220k+220k 等值分压后接到 GPIO4(ADC1),
+// ADC 读数约为电池电压的一半, 固件内部乘 2 还原。
+const uint8_t BATTERY_ADC_PIN = 4; // ESP32-C3 的 ADC2(GPIO5) 实际不可用("adc unit not supported"),
+                                    // 只有 ADC1(GPIO0~4) 能用, 所以改用原按键占用的 GPIO4,
+                                    // 对应把那颗按键的线挪到 GPIO5(纯数字输入, 不需要 ADC)
+const float BATTERY_DIVIDER_RATIO = 2.0f; // 分压比的倒数: 实际电压 = ADC电压 * 2
+const uint32_t BATTERY_SAMPLE_COUNT = 16;  // 多次采样取平均, 降低 ADC 噪声
+const uint32_t BATTERY_REPORT_INTERVAL_MS = 10000; // 每 10 秒测一次并上报
+
+NimBLECharacteristic *pBatteryVoltageChr = nullptr;
+uint32_t lastBatteryReportMs = 0;
+uint16_t lastBatteryMv = 0;
+uint8_t lastBatteryPercent = 0;
+
+// 单节锂电池放电曲线的简单分段线性近似(电压 mV -> 百分比), 比纯线性更贴近真实电量观感。
+// 电压越界(超过 4200 或低于 3000)会被夹到 100/0。
+uint8_t batteryVoltageToPercent(uint16_t mv) {
+  struct Point { uint16_t mv; uint8_t pct; };
+  static const Point curve[] = {
+    {4200, 100}, {4060, 90}, {3980, 80}, {3920, 70}, {3870, 65},
+    {3820, 60},  {3790, 55}, {3770, 50}, {3740, 45}, {3680, 40},
+    {3600, 30},  {3450, 20}, {3270, 10}, {3000, 0},
+  };
+  const int n = sizeof(curve) / sizeof(curve[0]);
+  if (mv >= curve[0].mv) return 100;
+  if (mv <= curve[n - 1].mv) return 0;
+  for (int i = 0; i < n - 1; i++) {
+    if (mv <= curve[i].mv && mv >= curve[i + 1].mv) {
+      // 在 curve[i+1] ~ curve[i] 之间线性插值
+      float t = (float)(mv - curve[i + 1].mv) / (float)(curve[i].mv - curve[i + 1].mv);
+      return (uint8_t)(curve[i + 1].pct + t * (curve[i].pct - curve[i + 1].pct));
+    }
+  }
+  return 0;
+}
+
+// 读取一次电池电压(多次采样平均), 更新 BLE 特征值并按需 notify, 同时同步到标准电池服务。
+void updateBatteryReading() {
+  uint32_t sumMv = 0;
+  for (uint32_t i = 0; i < BATTERY_SAMPLE_COUNT; i++) {
+    sumMv += analogReadMilliVolts(BATTERY_ADC_PIN);
+  }
+  uint16_t adcMv = (uint16_t)(sumMv / BATTERY_SAMPLE_COUNT);
+  uint16_t batteryMv = (uint16_t)(adcMv * BATTERY_DIVIDER_RATIO);
+  uint8_t percent = batteryVoltageToPercent(batteryMv);
+
+  lastBatteryMv = batteryMv;
+  lastBatteryPercent = percent;
+
+  Serial.printf("[BATTERY] adc=%umV battery=%umV percent=%u%%\n", adcMv, batteryMv, percent);
+
+  if (pBatteryVoltageChr) {
+    uint8_t payload[3] = {(uint8_t)(batteryMv & 0xFF), (uint8_t)(batteryMv >> 8), percent};
+    pBatteryVoltageChr->setValue(payload, 3);
+    if (bleConnected) {
+      pBatteryVoltageChr->notify();
+    }
+  }
+  if (pHid) {
+    pHid->setBatteryLevel(percent, bleConnected);
+  }
+}
+
+
 // 同时允许的最大连接数(1 条给手机/电脑的 HID 键盘连接, 1 条给 HanHan Agent 的 LED 控制连接)
 const uint8_t MAX_DESIRED_CONNECTIONS = 2;
 
@@ -188,6 +267,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     if (server->getConnectedCount() < MAX_DESIRED_CONNECTIONS) {
       NimBLEDevice::startAdvertising();
     }
+    // 省电: 主动请求拉长连接间隔 + 增大 slave latency, 减少无线电唤醒次数。
+    // 单位: interval=1.25ms 步进, timeout=10ms 步进。
+    // min=30ms, max=50ms, latency=4(空闲时最多可跳过4个连接事件不响应,
+    // 相当于空闲时实际间隔可放宽到 ~250ms), timeout=4s。
+    // 对于偶尔按键的场景, 这点延迟可接受, 换来待机耗电显著下降。
+    server->updateConnParams(connInfo.getConnHandle(), 24, 40, 4, 400);
   }
   void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
     bleConnected = server->getConnectedCount() > 0;
@@ -206,12 +291,12 @@ struct Button {
   bool pressedSent;  // 是否已经发送过 press
 };
 
-// GPIO0/1/3/4/10 -> F13~F17
+// GPIO0/1/3/5/10 -> F13~F17 (原 GPIO4 已让给电池分压 ADC, 该按键改接到 GPIO5)
 Button buttons[5] = {
   {0,  KEY_F13, true, true, 0, false},
   {1,  KEY_F14, true, true, 0, false},
   {3,  KEY_F15, true, true, 0, false},
-  {4,  KEY_F16, true, true, 0, false},
+  {5,  KEY_F16, true, true, 0, false},
   {10, KEY_F17, true, true, 0, false},
 };
 
@@ -352,12 +437,22 @@ void setupBle() {
     uint8_t initVal[3] = {ledAllocPercent[0], ledAllocPercent[1], ledAllocPercent[2]};
     pLedCalibChr->setValue(initVal, 3);
   }
+  // 自定义电池电压特征值(mV + 百分比), 同一个 LED Service 下, 支持 Notify
+  pBatteryVoltageChr = pLedService->createCharacteristic(
+    BATTERY_VOLTAGE_CHAR_UUID,
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+  );
   pLedService->start();
   Serial.println("[BLE] led service started");
 
   pHid->getHidService()->start(); // 保持向后兼容, 新版本server->start()会一并启动
   pServer->start();
   Serial.println("[BLE] server started");
+
+  // ADC 用于电池电压检测: 11dB 衰减对应约 0~2.6V 的较准确量程, 分压后的电压(<=2.1V)落在范围内
+  analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+  updateBatteryReading(); // 上电先测一次, 让 pHid 的电池服务初始值不是 0
+  lastBatteryReportMs = millis();
 
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   // 先设置名字(此时 scanResp 还未开启, 会直接写入主广播包),
@@ -385,6 +480,13 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
   Serial.println("\n\n[BOOT] ESP32C3 5key3led BLE firmware starting...");
+
+  // 省电: 降低 CPU 主频(80MHz 足够应付按键扫描 + LED 分时 + BLE, 比默认 160MHz
+  // 省下不少动态功耗)。注意: 当前这套 Arduino 预编译核心没有打开
+  // CONFIG_PM_ENABLE/CONFIG_BT_CTRL_MODEM_SLEEP, 所以自动 light sleep 和 BLE
+  // modem sleep 在这个工具链下用不了(需要换 ESP-IDF 自定义 sdkconfig 重新编译
+  // 整个核心, 工作量很大), 目前只能靠降频 + 连接参数优化来省电。
+  setCpuFrequencyMhz(80);
 
   // 按键: 内部上拉, 按下拉低
   for (auto &b : buttons) {
@@ -505,4 +607,16 @@ void loop() {
   updateLeds();
   handleUnbondCombo();
   ensureAdvertising();
+
+  uint32_t now = millis();
+  if (now - lastBatteryReportMs >= BATTERY_REPORT_INTERVAL_MS) {
+    lastBatteryReportMs = now;
+    updateBatteryReading();
+  }
+
+  // 省电: 让出 CPU 给 FreeRTOS 空闲任务(执行 WFI 指令降低核心瞬时功耗),
+  // 之前这里是纯忙等轮询, CPU 永远不停歇, 是待机功耗偏高的主因之一。
+  // 1ms 的让出对按键消抖(DEBOUNCE_MS 数量级更大)和 LED 分时窗口(10ms 一帧)
+  // 的精度影响可忽略(最多引入 ~1ms 的边沿抖动, 肉眼不可见)。
+  delay(1);
 }
