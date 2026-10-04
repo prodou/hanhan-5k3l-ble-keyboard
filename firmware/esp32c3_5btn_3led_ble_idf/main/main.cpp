@@ -223,7 +223,8 @@ const uint8_t BATTERY_ADC_PIN = 4; // ESP32-C3 的 ADC2(GPIO5) 实际不可用("
                                     // 对应把那颗按键的线挪到 GPIO5(纯数字输入, 不需要 ADC)
 const float BATTERY_DIVIDER_RATIO = 2.0f; // 分压比的倒数: 实际电压 = ADC电压 * 2
 const uint32_t BATTERY_SAMPLE_COUNT = 16;  // 多次采样取平均, 降低 ADC 噪声
-const uint32_t BATTERY_REPORT_INTERVAL_MS = 10000; // 每 10 秒测一次并上报
+const uint32_t BATTERY_REPORT_INTERVAL_MS = 60000; // 电池电压变化很慢, 10秒测一次没必要,
+                                                    // 改成60秒, 减少唤醒+ADC采样次数(省电)
 
 NimBLECharacteristic *pBatteryVoltageChr = nullptr;
 uint32_t lastBatteryReportMs = 0;
@@ -599,7 +600,8 @@ void setup() {
   // "已连接但空闲"状态下的平均电流。
   {
     esp_pm_config_t pmCfg = {};
-    pmCfg.max_freq_mhz = 80;   // 有任务时最高跑到 80MHz(按键扫描/BLE/LED 足够用)
+    pmCfg.max_freq_mhz = 80;   // 试过降到40MHz, 会导致btController任务饿死IDLE任务,
+                               // 触发watchdog反复复位(实测确认), 所以保持80不能再降
     pmCfg.min_freq_mhz = 10;   // 空闲时降到 10MHz, 配合 light sleep 省电
     pmCfg.light_sleep_enable = true; // 核心: 空闲时真正进入 light sleep
     esp_err_t pmErr = esp_pm_configure(&pmCfg);
