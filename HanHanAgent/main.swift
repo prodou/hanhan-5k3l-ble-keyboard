@@ -128,7 +128,10 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     private var ledCalibChar: CBCharacteristic?
     private var scanTimeoutWorkItem: DispatchWorkItem?
 
-    // 连上设备前如果调用了 send(), 先记下来, 连接建立后自动补发
+    // 记录"用户最近一次想要的 LED 效果", 不管当前有没有连上都会记下来;
+    // 连接建立后自动补发, 收到固件写入确认(didWriteValueFor 无 error)后才
+    // 清空——避免固件深睡断连期间攒的多次 send() 调用在下次重连时被重复
+    // 发送(只发最后一次想要的状态), 也避免还没真正送达就被误判"已完成"。
     private var pendingPayload: (mask: UInt8, mode: UInt8)?
 
     var onStatusChanged: (() -> Void)?
@@ -212,16 +215,28 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
 
     func send(mask: UInt8, mode: UInt8) {
+        // 不管当前有没有连上, 先把"用户想要的状态"记下来——真正送达并被固件
+        // 确认后(didWriteValueFor 无 error)才会清掉, 这样即使这次没连上,
+        // 下次连接建立时也一定会补发最新这一份, 且重连成功后只发一次。
+        pendingPayload = (mask, mode)
         guard let p = peripheral, p.state == .connected, let chr = ledChar else {
-            // 还没连上: 记下待发送内容, 顺便触发一次扫描连接
-            pendingPayload = (mask, mode)
             startScan()
             return
         }
+        writeLedPayload(mask: mask, mode: mode, to: p, char: chr)
+    }
+
+    private func writeLedPayload(mask: UInt8, mode: UInt8, to p: CBPeripheral, char chr: CBCharacteristic) {
         let data = Data([mask, mode])
         let writeType: CBCharacteristicWriteType = chr.properties.contains(.write) ? .withResponse : .withoutResponse
         p.writeValue(data, for: chr, type: writeType)
-        setStatus("已发送 mask=0b\(String(mask, radix: 2)) mode=\(mode)")
+        setStatus("已发送 mask=0b\(String(mask, radix: 2)) mode=\(mode), 等待固件确认...")
+        if writeType == .withoutResponse {
+            // 固件这颗特征值同时声明了 WRITE_NR, 理论上不会走到这个分支(上面优先选
+            // WRITE/withResponse); 万一真的只支持无响应写入, 没有确认回调可用,
+            // 只能乐观地当场清空, 保底不堆积重复发送。
+            pendingPayload = nil
+        }
     }
 
     // 一次性设置三颗 LED 的分配百分比(每个 0~100, 总和会被自动夹到 <=100),
@@ -306,11 +321,24 @@ final class HanHanBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDe
             setStatus("就绪: \(peripheral.name ?? "?")")
             // 连接建立后把本地保存的亮度校准值重新下发一遍, 固件重启后会丢失这个状态
             sendCalibration()
-            if let pending = pendingPayload {
-                pendingPayload = nil
-                send(mask: pending.mask, mode: pending.mode)
+            if let pending = pendingPayload, let chr = ledChar {
+                // 注意: 不在这里清空 pendingPayload, 要等 didWriteValueFor 确认
+                // 写入成功才清, 防止这次连接期间写入失败(比如又立刻断连)时
+                // 把用户想要的状态弄丢, 下次重连不会补发。
+                writeLedPayload(mask: pending.mask, mode: pending.mode, to: peripheral, char: chr)
             }
         }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == Self.ledCharUUID else { return }
+        if let error = error {
+            setStatus("LED 指令写入失败, 下次重连会重试: \(error.localizedDescription)")
+            return
+        }
+        // 固件已确认收到并执行, 清空待发状态, 避免下次重连重复发送同一条指令
+        pendingPayload = nil
+        setStatus("LED 指令已确认送达")
     }
 }
 
