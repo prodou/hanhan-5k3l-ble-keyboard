@@ -301,6 +301,16 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     // 对于偶尔按键的场景, 这点延迟可接受, 换来待机耗电显著下降。
     server->updateConnParams(connInfo.getConnHandle(), 24, 80, 10, 600);
   }
+  // 诊断用: 打印对端(手机/电脑系统蓝牙)最终实际采纳的连接参数, 用来确认
+  // "对端没有按我们的请求来, 实际间隔仍然很短" 这个猜测是否属实。
+  // 注意: 这个事件发生在运行期(不在开机 grace 窗口内), USB-Serial-JTAG
+  // 在 light sleep 深睡后会读不到, 如果要抓这条日志, 需要在参数协商刚
+  // 完成、设备还没进入深度 light sleep 的那一小段时间内连上串口监听。
+  void onConnParamsUpdate(NimBLEConnInfo &connInfo) override {
+    Serial.printf("[BLE] connParams updated: interval=%.2fms latency=%u timeout=%ums\n",
+                  connInfo.getConnInterval() * 1.25f, connInfo.getConnLatency(),
+                  connInfo.getConnTimeout() * 10);
+  }
   void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
     bleConnected = server->getConnectedCount() > 0;
     Serial.printf("[BLE] onDisconnect reason=%d, connectedCount=%u\n", reason, server->getConnectedCount());
@@ -490,6 +500,12 @@ void ledcSetup() {
 
 void setupBle() {
   NimBLEDevice::init("HanHan 5K3L v0.1");
+
+  // 降低发射功率: -9dBm 实测距离太近(需要贴近才能扫到/保持连接), 日常
+  // 桌面使用距离(半米到一两米, 且中间常隔着机身/手)信号不够用。回调到
+  // -3dBm, 比默认最大功率(+9dBm)省一些发射电流, 同时保留正常桌面距离的
+  // 可靠连接范围。
+  NimBLEDevice::setPower(-3);
 
   // 启用绑定(bonding), 不要求输入/输出(Just Works 配对),
   // 让手机把本设备当成正式的蓝牙键盘配对并记住, 支持自动重连和在系统里断开/忘记。
