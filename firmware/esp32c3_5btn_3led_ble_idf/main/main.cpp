@@ -280,8 +280,12 @@ void updateBatteryReading() {
 }
 
 
-// 同时允许的最大连接数(1 条给手机/电脑的 HID 键盘连接, 1 条给 HanHan Agent 的 LED 控制连接)
-const uint8_t MAX_DESIRED_CONNECTIONS = 2;
+// 同时允许的最大连接数。原来设成2是以为手机/电脑的HID连接和HanHan Agent的
+// LED控制连接是两条独立连接, 需要各占一条。后来证实HanHan Agent优先复用
+// 系统已有的那条连接(retrieveConnectedPeripherals), 并不会额外建连接;
+// 加上用户确认平时只用一台设备连接, 改成1之后, 连上这一台设备后就彻底
+// 停止广播, 省掉广播包本身的周期性射频开销。
+const uint8_t MAX_DESIRED_CONNECTIONS = 1;
 
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &connInfo) override {
