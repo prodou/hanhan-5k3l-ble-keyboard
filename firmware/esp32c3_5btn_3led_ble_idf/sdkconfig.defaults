@@ -31,6 +31,13 @@ CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
 # 测到 0.16W/32mA 降不下去的真正原因。开启后主晶振在 light sleep 期间保持
 # 供电(牺牲一点点电流), 换来其余大部分外设/数字域真正进入低功耗 light sleep。
 CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+# 关键: 深度睡眠架构下每次睡眠都是一次完整重启(RAM 清空), NimBLE 默认把
+# 配对/绑定信息(bond)只存在 RAM 里, 不开这个的话每次深睡唤醒绑定信息都会
+# 丢失——但电脑那边还记得旧的绑定, 于是每次重连都被识别成"对方丢失了配对
+# 信息", 要么弹确认框要么直接连接失败("Peer removed pairing information")。
+# 打开后绑定信息存到 NVS(flash), 深睡/断电都不会丢。
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+CONFIG_NIMBLE_NVS_PERSIST=y
 # end of Bluetooth controller
 
 # IDF v6 requirements

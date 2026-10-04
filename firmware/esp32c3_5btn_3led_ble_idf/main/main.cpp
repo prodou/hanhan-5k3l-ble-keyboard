@@ -1,6 +1,8 @@
 #include "Arduino.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "driver/ledc.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -154,13 +156,17 @@ enum LedMode : uint8_t {
 const uint8_t LED_ALLOC_SUM_MAX = 100; // 三颗灯的分配百分比总和上限(时分复用天然保证任意时刻只有一颗导通,
                                         // 所以只要总和不超过一帧, 怎么分配都不会叠加电流)
 
-volatile bool ledEnabled[3] = {false, false, false}; // mask: 常亮/闪烁模式下哪些灯参与显示
-volatile uint8_t ledMode = LED_MODE_STATIC;
+RTC_DATA_ATTR volatile bool ledEnabled[3] = {false, false, false}; // mask: 常亮/闪烁模式下哪些灯参与显示
+RTC_DATA_ATTR volatile uint8_t ledMode = LED_MODE_STATIC;
 // 每颗 LED 分配到的帧内占比(0~100), 三者总和不能超过 100, 用于:
 //   1) 抵消不同颜色 LED 正向压降不同导致的肉眼亮度差异
 //   2) 让用户在总预算内自由分配亮度(比如想要某颗更亮, 可以多分配一些给它)
 // 默认三等分(各 30, 总和 90, 留一点余量), 由 HanHan Agent 下发调整。
-volatile uint8_t ledAllocPercent[3] = {30, 30, 30};
+// 注意: 这三个 LED 状态变量标了 RTC_DATA_ATTR, 是为了配合下面的深度睡眠省电方案——
+// 深度睡眠会断电重启(只有 RTC 内存域不断电), 加这个属性后这几个变量的值能在
+// 深度睡眠醒来后还保留(不会被重新初始化成默认值), 这样电脑之前下发的 LED 状态
+// 不会因为芯片睡一觉就丢掉。
+RTC_DATA_ATTR volatile uint8_t ledAllocPercent[3] = {30, 30, 30};
 
 // 把三个百分比值按总和 <=100 的约束夹一遍: 单值先夹到 0~100, 总和超了就按比例整体缩小。
 void clampLedAllocation(uint8_t vals[3]) {
@@ -181,6 +187,53 @@ void clampLedAllocation(uint8_t vals[3]) {
 // (配置一变就立刻应用一次) 和下面的闪烁/流水灯定时步进调用。
 void applyLedOutputs();
 
+// ---- 空闲深度睡眠省电 ----
+// 长时间没人碰按键时, 让芯片整体进入"深度睡眠"(比目前的 light sleep 更彻底,
+// CPU/BLE 控制器全部断电, 只留 RTC 域); 醒来时等同于重新开机, BLE 栈重新初始化
+// 广播——这条"断电重插后总能自动重连、不用重新配对"的路径已经在这个项目里
+// 反复验证过是可靠的(而直接调用 BLE disconnect() 主动断连, 实测 macOS 不会
+// 自动重连, 需要手动忽略设备重新搜索, 行不通, 这里改用深度睡眠绕开这个问题)。
+// 代价:
+//   1) ESP32-C3 只有 GPIO0/1/3/5 这几个脚支持深度睡眠时的按键唤醒, 接在 GPIO10
+//      上的那颗键(回车键)没有这个硬件能力, 单独按它无法唤醒芯片, 要等下面的
+//      定时唤醒窗口才会被处理(电脑想点亮 LED 也是靠这个定时窗口推送, 两者延迟
+//      量级相同, 都在 DEEP_SLEEP_PERIOD_US 以内)。
+//   2) 断开期间电脑要点亮 LED 会有延迟(最多到下一次定时唤醒广播窗口为止)。
+//   3) 睡眠期间如果 LED 效果是"2颗或3颗同时亮"(分时复用), 没法在断电期间维持
+//      这种动态波形, 会在睡眠期间暂时熄灭、醒来后恢复; 常见的"0~1颗常亮"场景
+//      通过下面的 GPIO hold 机制可以在睡眠期间维持物理电平不灭。
+// 按键活跃时, 允许连续按键/短暂停顿后继续按键而不必每次都重新走一遍(较贵的)
+// BLE 重连; 10 秒给得比较松, 减少"刚断又要连"的来回折腾。
+const uint32_t IDLE_SLEEP_MS = 10000;       // 距上次按键 10 秒没有任何按键活动就准备深度睡眠
+// 单纯的定时醒来(没人按键、电脑也没连上来)场景下, 不需要陪跑到 IDLE_SLEEP_MS
+// 这么久——只要给 BLE 协议栈/广播一点点启动时间即可, 没事就尽快回去睡觉。
+const uint32_t MIN_AWAKE_MS = 1500;         // 每次醒来至少保持 1.5 秒, 留时间给 BLE 栈起来广播
+// 电脑连上来写一次 LED 指令后, 不必等到 IDLE_SLEEP_MS 那么久——执行完指令、
+// 留一点点余量让 ACK/通知发出去就可以尽快回去睡觉了。
+const uint32_t BLE_QUICK_SLEEP_MS = 2000;   // 连接/收到一次指令后, 额外多等这么久就可以睡了
+const uint64_t DEEP_SLEEP_PERIOD_US = 10000000ULL; // 最长睡 10 秒后定时醒来广播一次(刚好对齐你接受的≤10秒延迟上限)
+volatile uint32_t lastActivityMs = 0;  // 最近一次"按键"活动(决定能不能继续用 10 秒长窗口)
+volatile uint32_t lastBleEventMs = 0;  // 最近一次"BLE 连接/收到指令"活动(只给短窗口)
+uint32_t bootTimeMs = 0; // 本次(深度睡眠醒来后的新一轮)开机时间, 配合 MIN_AWAKE_MS 使用
+
+// 按键活动时在本地立即熄灭所有 LED(不等电脑指令), 让用户按键时能立刻看到反馈;
+// 电脑下次想点亮 LED 会重新写入 ledEnabled, 和这里互不冲突。
+void onLocalActivity() {
+  lastActivityMs = millis();
+  if (ledEnabled[0] || ledEnabled[1] || ledEnabled[2]) {
+    ledEnabled[0] = false;
+    ledEnabled[1] = false;
+    ledEnabled[2] = false;
+    applyLedOutputs();
+  }
+}
+
+// 深度睡眠前, 尽量让 LED 物理电平在断电期间也保持住(见上面代价3的说明):
+// 只有同时最多 1 颗 LED 要求亮起时才能用 GPIO hold 稳定维持(本来就是最常见的
+// 用法——三颗灯分别代表不同状态, 很少同时点亮), 2/3 颗同时亮的分时复用场景
+// 没法在睡眠期间维持, 直接放行让它们暂时熄灭。
+void prepareLedsForDeepSleep();
+
 class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pChr, NimBLEConnInfo &connInfo) override {
     std::string v = pChr->getValue();
@@ -195,6 +248,7 @@ class LedStatusCallbacks : public NimBLECharacteristicCallbacks {
     ledMode = (v.length() >= 2) ? (uint8_t)v[1] : LED_MODE_STATIC;
     Serial.printf("[LED] write mask=0b%03b mode=%u\n", mask & 0x07, ledMode);
     applyLedOutputs();
+    lastBleEventMs = millis(); // 指令已执行, 只需再等 BLE_QUICK_SLEEP_MS 就能睡
   }
 };
 
@@ -210,6 +264,7 @@ class LedCalibCallbacks : public NimBLECharacteristicCallbacks {
     Serial.printf("[LED] allocation%% = %u, %u, %u\n",
                   ledAllocPercent[0], ledAllocPercent[1], ledAllocPercent[2]);
     applyLedOutputs();
+    lastBleEventMs = millis(); // 指令已执行, 只需再等 BLE_QUICK_SLEEP_MS 就能睡
   }
 };
 
@@ -291,6 +346,10 @@ const uint8_t MAX_DESIRED_CONNECTIONS = 1;
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &connInfo) override {
     bleConnected = true;
+    lastBleEventMs = millis(); // 连接建立也算一次 BLE 活动, 给 BLE_QUICK_SLEEP_MS
+                                // 的短窗口, 留时间给电脑把 LED 指令写进来(之前这里
+                                // 没刷新, 实测出现连上 1 秒不到又被强制睡眠, 按键
+                                // 完全来不及送达电脑的问题)。
     Serial.printf("[BLE] onConnect, connectedCount=%u\n", server->getConnectedCount());
     // 只要还没到连接数上限, 继续广播以便接纳另一条连接(例如手机当键盘用的同时,
     // HanHan Agent 还要单独连一条 BLE 来控制 LED)
@@ -395,6 +454,35 @@ void handleUnbondCombo() {
   }
 }
 
+// 空闲太久(IDLE_SLEEP_MS 内没有任何按键活动, 且至少已经醒了 MIN_AWAKE_MS)时
+// 进入深度睡眠; GPIO0/1/3/5 按键 + 定时器会把它重新唤醒(见上面 IDLE_SLEEP_MS
+// 注释), 醒来后相当于重新开机, setup() 里会重新初始化 BLE 并开始广播。
+// 空闲太久时进入深度睡眠, 分两种情况判断(见上面常量注释):
+//   - 有按键活动: 按 IDLE_SLEEP_MS(10秒) 的长窗口等, 方便连续按键。
+//   - 只有 BLE 连接/指令、没有按键: 按 BLE_QUICK_SLEEP_MS(2秒) 的短窗口等,
+//     指令执行完/没人连接就尽快回去睡觉, 不陪跑没必要的长时间。
+// GPIO0/1/3/5 按键 + 定时器会把它重新唤醒(见上面 IDLE_SLEEP_MS 注释), 醒来后
+// 相当于重新开机, setup() 里会重新初始化 BLE 并开始广播。
+void goToDeepSleepIfIdle() {
+  uint32_t now = millis();
+  if ((int32_t)(now - bootTimeMs) < (int32_t)MIN_AWAKE_MS) return; // 刚醒不久, 先留时间给 BLE
+  if ((int32_t)(now - lastActivityMs) < (int32_t)IDLE_SLEEP_MS) return;      // 按键长窗口还没到
+  if ((int32_t)(now - lastBleEventMs) < (int32_t)BLE_QUICK_SLEEP_MS) return; // BLE 短窗口还没到
+
+  Serial.println("[SLEEP] idle -> entering deep sleep");
+  Serial.flush();
+
+  prepareLedsForDeepSleep();
+
+  // 只有 GPIO0/1/3/5 支持深度睡眠按键唤醒(GPIO10 不支持, 见上面注释),
+  // 低电平(按下)唤醒。
+  const uint64_t wakePinMask = (1ULL << 0) | (1ULL << 1) | (1ULL << 3) | (1ULL << 5);
+  esp_deep_sleep_enable_gpio_wakeup(wakePinMask, ESP_GPIO_WAKEUP_GPIO_LOW);
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_PERIOD_US);
+  gpio_deep_sleep_hold_en();
+  esp_deep_sleep_start(); // 不会返回, 芯片断电重启
+}
+
 // 当前按下的按键集合(最多 6 个, 跟 HID boot keyboard report 对齐)
 uint8_t activeKeys[6] = {0, 0, 0, 0, 0, 0};
 
@@ -468,6 +556,7 @@ esp_pm_lock_handle_t bootGraceLock = nullptr;
 bool bootGraceHeld = false;
 const uint32_t BOOT_USB_GRACE_MS = 5000;
 uint32_t bootGraceEndMs = 0;
+
 
 // 闪烁效果: 慢速整体亮/灭切换(这里的"亮"仍然要经过上面的分时窗口, 不是常通)
 const uint32_t BLINK_PERIOD_MS = 800; // 亮400ms / 灭400ms
@@ -592,6 +681,17 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
   Serial.println("\n\n[BOOT] ESP32C3 5key3led BLE firmware starting...");
+  {
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    Serial.printf("[BOOT] wakeup cause = %d (0=power-on/reset, 4=timer, 7=gpio)\n", (int)cause);
+  }
+
+  // 深度睡眠期间可能用 gpio_hold_en() 固定过 LED 电平(见 prepareLedsForDeepSleep()),
+  // 醒来后要先解除, 不然 LEDC 没法重新接管这几个引脚的输出。
+  for (uint8_t i = 0; i < 3; i++) {
+    gpio_hold_dis((gpio_num_t)LED_PINS[i]);
+  }
+  gpio_deep_sleep_hold_dis();
 
   // 省电(ESP-IDF 工具链版本): 这里换成了自定义 sdkconfig 编译的 ESP-IDF 工程
   // (而不是 Arduino IDE 自带的预编译核心), 打开了 CONFIG_PM_ENABLE +
@@ -622,16 +722,25 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(b.pin), buttonIsr, CHANGE);
   }
 
-  // LED: 配置硬件 LEDC PWM(见上方 "LED 配置" 注释), 初始全灭、不占用 PM 锁。
+  // LED: 配置硬件 LEDC PWM(见上方 "LED 配置" 注释); ledEnabled/ledMode 是
+  // RTC_DATA_ATTR, 深度睡眠醒来后还保留着睡前的状态, 这里会按那个状态重新点亮
+  // (不是每次都从全灭开始)。
   ledcSetup();
 
   setupBle();
   Serial.println("[BOOT] setup() complete, entering loop()");
 
   uint32_t bootNow = millis();
+  bootTimeMs = bootNow;
   nextBlinkToggleMs = bootNow + BLINK_PERIOD_MS / 2;
   nextChaseStepMs = bootNow + CHASE_STEP_MS;
-  applyLedOutputs(); // 初始状态(全灭)应用一次
+  // 注意: lastActivityMs(按键长窗口 10 秒)要初始化成"已经过期", 否则单纯定时
+  // 醒来、没人碰按键的情况下也会被这个长窗口挡住, 白白多陪跑将近 10 秒
+  // (实测症状: 本应几乎立刻回睡, 结果要等 ~12 秒才再次休眠)。真正按下按键时
+  // onLocalActivity() 会把它刷新成当前时间, 这时才会启用 10 秒长窗口。
+  lastActivityMs = bootNow - IDLE_SLEEP_MS - 1;
+  lastBleEventMs = bootNow; // BLE 短窗口(2秒)还是要从开机算起, 留时间给连接/广播
+  applyLedOutputs(); // 按保留下来的状态重新应用一次(睡前是灭的就还是灭, 亮的就还是亮)
 }
 
 void scanButtons() {
@@ -642,6 +751,7 @@ void scanButtons() {
     if (raw != b.lastRaw) {
       b.lastChangeMs = now;
       b.lastRaw = raw;
+      onLocalActivity(); // 任何按键边沿都算活动: 刷新空闲计时 + 本地立即灭灯
     }
 
     if ((now - b.lastChangeMs) >= DEBOUNCE_MS && raw != b.lastStable) {
@@ -736,6 +846,38 @@ void applyLedOutputs() {
   }
 }
 
+// 深度睡眠会把 LEDC 外设一起断电, PWM 波形没法维持; 睡眠前改成普通 GPIO
+// 输出 + gpio_hold_en() 固定电平, 这样 0~1 颗常亮的常见场景能在整个睡眠期间
+// 保持物理亮灭不变。2/3 颗同时亮(分时复用)没法这样维持, 直接放行熄灭,
+// 等下次醒来 applyLedOutputs() 会按 ledMode/ledEnabled 重新算一遍恢复正常。
+void prepareLedsForDeepSleep() {
+  bool wantOn[3] = {false, false, false};
+  switch (ledMode) {
+    case LED_MODE_OFF:
+      break;
+    case LED_MODE_BLINK:
+      for (uint8_t i = 0; i < 3; i++) wantOn[i] = ledEnabled[i] && blinkPhaseOn;
+      break;
+    case LED_MODE_CHASE:
+      wantOn[chaseIndex] = true;
+      break;
+    case LED_MODE_STATIC:
+    default:
+      for (uint8_t i = 0; i < 3; i++) wantOn[i] = ledEnabled[i];
+      break;
+  }
+  uint8_t onCount = 0;
+  for (uint8_t i = 0; i < 3; i++) if (wantOn[i]) onCount++;
+
+  if (onCount > 1) return; // 没法维持, 直接让它们睡眠期间熄灭
+
+  for (uint8_t i = 0; i < 3; i++) {
+    gpio_set_direction((gpio_num_t)LED_PINS[i], GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)LED_PINS[i], wantOn[i] ? 1 : 0);
+    gpio_hold_en((gpio_num_t)LED_PINS[i]);
+  }
+}
+
 // 广播看门狗: 定期兜底检查, 只要连接数还没到上限但当前又没在广播(例如某次异常
 // 导致广播意外停掉, 而 onConnect/onDisconnect 都没能触发重新广播), 就主动补一次,
 // 避免出现"怎么都搜不到设备"的死锁状态。
@@ -757,6 +899,7 @@ void loop() {
   scanButtons();
   handleUnbondCombo();
   ensureAdvertising();
+  goToDeepSleepIfIdle();
 
   uint32_t now = millis();
 
