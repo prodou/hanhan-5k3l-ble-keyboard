@@ -1,0 +1,11 @@
+# ESP-IDF 构建产物(每次 idf.py build 自动生成, 不需要入库)
+build/
+
+# idf component manager 自动拉取的外部组件(managed_components, 由 idf_component.yml/
+# dependencies.lock 描述, 首次 build 时会自动重新下载, 不需要入库)
+managed_components/
+
+# 由 sdkconfig.defaults + menuconfig 交互生成的最终配置快照, 换一台机器/
+# 升级 ESP-IDF 版本后会自动重新生成, 真正的配置意图以 sdkconfig.defaults 为准
+sdkconfig
+sdkconfig.old

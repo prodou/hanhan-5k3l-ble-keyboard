@@ -1,0 +1,89 @@
+#
+# Arduino ESP32
+#
+CONFIG_AUTOSTART_ARDUINO=y
+# end of Arduino ESP32
+
+#
+# FREERTOS
+#
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# end of FREERTOS
+
+#
+# Power management: 真正的省电关键配置
+#
+CONFIG_PM_ENABLE=y
+CONFIG_PM_DFS_INIT_AUTO=y
+# end of Power management
+
+#
+# Bluetooth controller: 打开 modem sleep, 使 BLE 连接态空闲时射频也能休眠
+#
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+# 关键: 不开这个的话, BT 控制器会把 no_light_sleep 标志设为 1, 导致整机
+# "light sleep" 在蓝牙开启后完全失效(只剩 CPU 动态调频在生效), 这也是之前
+# 测到 0.16W/32mA 降不下去的真正原因。开启后主晶振在 light sleep 期间保持
+# 供电(牺牲一点点电流), 换来其余大部分外设/数字域真正进入低功耗 light sleep。
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+# end of Bluetooth controller
+
+# IDF v6 requirements
+# esp-dsp and other things fail to build with picolibc
+CONFIG_LIBC_NEWLIB=y
+# required for tinyusb and some IDF components to build properly
+CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
+
+#
+# Arduino selective compilation: 我们只用 NimBLE-Arduino(外部库)做 BLE,
+# 不需要 arduino-esp32 自带的其它库(自带 BLE 库基于 Bluedroid, 和我们的
+# NimBLE 配置冲突编译不过; WiFi/以太网/文件系统/OTA 等本项目也完全用不到),
+# 全部关掉能让编译过, 也能减小体积。
+#
+CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
+CONFIG_ARDUINO_SELECTIVE_SPI=n
+CONFIG_ARDUINO_SELECTIVE_Wire=n
+CONFIG_ARDUINO_SELECTIVE_ESP_SR=n
+CONFIG_ARDUINO_SELECTIVE_ESP_Video=n
+CONFIG_ARDUINO_SELECTIVE_EEPROM=n
+CONFIG_ARDUINO_SELECTIVE_Preferences=n
+CONFIG_ARDUINO_SELECTIVE_Ticker=n
+CONFIG_ARDUINO_SELECTIVE_Update=n
+CONFIG_ARDUINO_SELECTIVE_Zigbee=n
+CONFIG_ARDUINO_SELECTIVE_FS=n
+CONFIG_ARDUINO_SELECTIVE_SD=n
+CONFIG_ARDUINO_SELECTIVE_SD_MMC=n
+CONFIG_ARDUINO_SELECTIVE_SPIFFS=n
+CONFIG_ARDUINO_SELECTIVE_FFat=n
+CONFIG_ARDUINO_SELECTIVE_LittleFS=n
+CONFIG_ARDUINO_SELECTIVE_Network=n
+CONFIG_ARDUINO_SELECTIVE_Ethernet=n
+CONFIG_ARDUINO_SELECTIVE_PPP=n
+CONFIG_ARDUINO_SELECTIVE_Hash=n
+CONFIG_ARDUINO_SELECTIVE_ArduinoOTA=n
+CONFIG_ARDUINO_SELECTIVE_AsyncUDP=n
+CONFIG_ARDUINO_SELECTIVE_DNSServer=n
+CONFIG_ARDUINO_SELECTIVE_ESPmDNS=n
+CONFIG_ARDUINO_SELECTIVE_HTTPClient=n
+CONFIG_ARDUINO_SELECTIVE_Matter=n
+CONFIG_ARDUINO_SELECTIVE_NetBIOS=n
+CONFIG_ARDUINO_SELECTIVE_WebServer=n
+CONFIG_ARDUINO_SELECTIVE_WiFi=n
+CONFIG_ARDUINO_SELECTIVE_NetworkClientSecure=n
+CONFIG_ARDUINO_SELECTIVE_WiFiProv=n
+CONFIG_ARDUINO_SELECTIVE_BLE=n
+CONFIG_ARDUINO_SELECTIVE_BluetoothSerial=n
+CONFIG_ARDUINO_SELECTIVE_SimpleBLE=n
+CONFIG_ARDUINO_SELECTIVE_RainMaker=n
+CONFIG_ARDUINO_SELECTIVE_OpenThread=n
+CONFIG_ARDUINO_SELECTIVE_Insights=n
+
+# 不使用 WiFi, 彻底关闭以避免 BT/WiFi coexistence 共享内存结构
+# (CONFIG_ESP_COEX_SW_COEXIST_ENABLE) 在 WiFi 从未初始化时导致的
+# "HLI Magic mismatch" 崩溃 (r_lld_env_init 内部检测到协处理结构未就绪)。
+CONFIG_ESP_WIFI_ENABLED=n
